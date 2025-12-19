@@ -1,0 +1,509 @@
+/*
+ * MainViewModel.cs - Логика главного окна (MVVM паттерн)
+ * 
+ * БЕЗОПАСНОСТЬ:
+ * - Этот файл содержит ТОЛЬКО логику интерфейса
+ * - Не выполняет никаких системных операций напрямую
+ * - Все действия делегируются сервисам (XrayService, ConfigurationService)
+ * 
+ * MVVM (Model-View-ViewModel):
+ * - Model = VlessConfig, AppSettings (данные)
+ * - View = MainWindow.xaml (интерфейс)
+ * - ViewModel = MainViewModel (связь между ними)
+ */
+
+using System.Collections.ObjectModel;
+using System.Windows;
+using System.Windows.Threading;
+using CommunityToolkit.Mvvm.ComponentModel;
+using CommunityToolkit.Mvvm.Input;
+using VlessVPN.Models;
+using VlessVPN.Services;
+
+namespace VlessVPN.ViewModels;
+
+/// <summary>
+/// ViewModel для главного окна
+/// Использует CommunityToolkit.Mvvm для упрощения кода
+/// </summary>
+public partial class MainViewModel : ObservableObject
+{
+    // Сервисы для работы с VPN и настройками
+    private readonly XrayService _xrayService;
+    private readonly ConfigurationService _configService;
+    
+    // Таймер для обновления длительности подключения
+    private readonly DispatcherTimer _timer;
+
+    // ===== Свойства для привязки данных (Data Binding) =====
+    // [ObservableProperty] автоматически генерирует уведомления об изменениях
+
+    /// <summary>Список серверов</summary>
+    [ObservableProperty]
+    private ObservableCollection<VlessConfig> _servers = new();
+
+    /// <summary>Выбранный сервер в списке</summary>
+    [ObservableProperty]
+    private VlessConfig? _selectedServer;
+
+    /// <summary>Текущее состояние подключения</summary>
+    [ObservableProperty]
+    private ConnectionState _connectionState = ConnectionState.Disconnected;
+
+    /// <summary>Текстовое сообщение о статусе</summary>
+    [ObservableProperty]
+    private string _statusMessage = "Not connected";
+
+    /// <summary>Длительность подключения (HH:MM:SS)</summary>
+    [ObservableProperty]
+    private string _connectionDuration = "00:00:00";
+
+    /// <summary>Текст логов для отображения</summary>
+    [ObservableProperty]
+    private string _logOutput = "";
+
+    /// <summary>Флаг: подключено ли сейчас</summary>
+    [ObservableProperty]
+    private bool _isConnected;
+
+    /// <summary>Флаг: идёт ли подключение</summary>
+    [ObservableProperty]
+    private bool _isConnecting;
+
+    /// <summary>Порт SOCKS5 прокси</summary>
+    [ObservableProperty]
+    private int _localPort;
+
+    /// <summary>Порт HTTP прокси</summary>
+    [ObservableProperty]
+    private int _httpPort;
+
+    /// <summary>Использовать системный прокси</summary>
+    [ObservableProperty]
+    private bool _enableSystemProxy;
+
+    /// <summary>Поле ввода для импорта URI</summary>
+    [ObservableProperty]
+    private string _importUri = "";
+
+    /// <summary>Включить обход прокси для определённых доменов</summary>
+    [ObservableProperty]
+    private bool _enableBypass;
+
+    /// <summary>Текст со списком доменов для обхода (по одному на строку)</summary>
+    [ObservableProperty]
+    private string _bypassDomainsText = "";
+
+    // Время начала подключения для расчёта длительности
+    private DateTime? _connectedSince;
+
+    public MainViewModel()
+    {
+        // Инициализация сервисов
+        _xrayService = new XrayService();
+        _configService = new ConfigurationService();
+
+        // Загрузка настроек из файла
+        LocalPort = _configService.Settings.LocalPort;
+        HttpPort = _configService.Settings.HttpPort;
+        EnableSystemProxy = _configService.Settings.EnableSystemProxy;
+        EnableBypass = _configService.Settings.EnableBypass;
+        BypassDomainsText = string.Join("\n", _configService.Settings.BypassDomains);
+
+        // Загрузка списка серверов
+        foreach (var server in _configService.Settings.Servers)
+        {
+            Servers.Add(server);
+        }
+
+        // Выбор последнего использованного сервера или первого в списке
+        if (!string.IsNullOrEmpty(_configService.Settings.LastConnectedServerId))
+        {
+            SelectedServer = Servers.FirstOrDefault(s => s.Id == _configService.Settings.LastConnectedServerId);
+        }
+        SelectedServer ??= Servers.FirstOrDefault();
+
+        // Подписка на события от XrayService
+        
+        // Получение логов от xray
+        _xrayService.OutputReceived += (s, msg) =>
+        {
+            // Обновление UI должно происходить в UI потоке
+            Application.Current.Dispatcher.Invoke(() =>
+            {
+                LogOutput += $"[{DateTime.Now:HH:mm:ss}] {msg}\n";
+                
+                // Ограничиваем размер лога чтобы не переполнить память
+                if (LogOutput.Length > 50000)
+                {
+                    LogOutput = LogOutput.Substring(LogOutput.Length - 40000);
+                }
+            });
+        };
+
+        // Изменение состояния подключения
+        _xrayService.StateChanged += (s, state) =>
+        {
+            Application.Current.Dispatcher.Invoke(() =>
+            {
+                ConnectionState = state;
+                UpdateStatusFromState(state);
+            });
+        };
+
+        // Таймер для обновления длительности каждую секунду
+        _timer = new DispatcherTimer
+        {
+            Interval = TimeSpan.FromSeconds(1)
+        };
+        _timer.Tick += (s, e) => UpdateDuration();
+    }
+
+    /// <summary>
+    /// Обновляет UI в зависимости от состояния подключения
+    /// </summary>
+    private void UpdateStatusFromState(ConnectionState state)
+    {
+        IsConnecting = state == ConnectionState.Connecting;
+        IsConnected = state == ConnectionState.Connected;
+
+        // Текстовое сообщение для пользователя
+        StatusMessage = state switch
+        {
+            ConnectionState.Disconnected => "Not connected",
+            ConnectionState.Connecting => "Connecting...",
+            ConnectionState.Connected => $"Connected to {SelectedServer?.Name ?? "server"}",
+            ConnectionState.Disconnecting => "Disconnecting...",
+            ConnectionState.Error => "Connection error",
+            _ => "Unknown"
+        };
+
+        // Запуск/остановка таймера длительности
+        if (state == ConnectionState.Connected)
+        {
+            _connectedSince = DateTime.Now;
+            _timer.Start();
+        }
+        else
+        {
+            _timer.Stop();
+            _connectedSince = null;
+            ConnectionDuration = "00:00:00";
+        }
+    }
+
+    /// <summary>
+    /// Обновляет отображение длительности подключения
+    /// </summary>
+    private void UpdateDuration()
+    {
+        if (_connectedSince.HasValue)
+        {
+            var duration = DateTime.Now - _connectedSince.Value;
+            ConnectionDuration = duration.ToString(@"hh\:mm\:ss");
+        }
+    }
+
+    // ===== Команды (вызываются из UI) =====
+    // [RelayCommand] автоматически создаёт ICommand для привязки к кнопкам
+
+    /// <summary>
+    /// Подключение к выбранному серверу
+    /// </summary>
+    [RelayCommand]
+    private async Task Connect()
+    {
+        if (SelectedServer == null)
+        {
+            StatusMessage = "Please select a server";
+            return;
+        }
+
+        // Сохраняем настройки перед подключением
+        _configService.Settings.LocalPort = LocalPort;
+        _configService.Settings.HttpPort = HttpPort;
+        _configService.Settings.EnableSystemProxy = EnableSystemProxy;
+        _configService.Settings.LastConnectedServerId = SelectedServer.Id;
+        _configService.SaveSettings();
+
+        // Запускаем подключение (делегируем XrayService)
+        await _xrayService.StartXray(SelectedServer);
+    }
+
+    /// <summary>
+    /// Отключение от VPN
+    /// </summary>
+    [RelayCommand]
+    private async Task Disconnect()
+    {
+        await _xrayService.StopXrayAsync();
+    }
+
+    /// <summary>
+    /// Переключение подключения (кнопка Connect/Disconnect)
+    /// </summary>
+    [RelayCommand]
+    private async Task ToggleConnection()
+    {
+        if (IsConnected || IsConnecting)
+        {
+            await Disconnect();
+        }
+        else
+        {
+            await Connect();
+        }
+    }
+
+    /// <summary>
+    /// Добавление нового пустого сервера
+    /// </summary>
+    [RelayCommand]
+    private void AddServer()
+    {
+        var server = new VlessConfig { Name = $"Server {Servers.Count + 1}" };
+        Servers.Add(server);
+        _configService.AddServer(server);
+        SelectedServer = server;
+    }
+
+    /// <summary>
+    /// Удаление выбранного сервера
+    /// </summary>
+    [RelayCommand]
+    private void RemoveServer()
+    {
+        if (SelectedServer == null) return;
+
+        // Нельзя удалить сервер к которому подключены
+        if (IsConnected && _configService.Settings.LastConnectedServerId == SelectedServer.Id)
+        {
+            MessageBox.Show("Please disconnect before removing this server.", "Warning", 
+                MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+
+        var server = SelectedServer;
+        Servers.Remove(server);
+        _configService.RemoveServer(server.Id);
+        SelectedServer = Servers.FirstOrDefault();
+    }
+
+    /// <summary>
+    /// Импорт серверов из буфера обмена
+    /// Поддерживает:
+    /// - Несколько VLESS ссылок (по одной на строку)
+    /// - URL подписки (subscription)
+    /// </summary>
+    [RelayCommand]
+    private async Task ImportFromClipboard()
+    {
+        try
+        {
+            var text = Clipboard.GetText();
+            ImportUri = text;
+            
+            if (string.IsNullOrWhiteSpace(text))
+            {
+                LogOutput += "[INFO] Clipboard is empty\n";
+                return;
+            }
+
+            var trimmedText = text.Trim();
+
+            // Если это URL подписки - загружаем её
+            if (_configService.IsSubscriptionUrl(trimmedText))
+            {
+                await ImportFromSubscription(trimmedText);
+                return;
+            }
+
+            // Иначе парсим как список VLESS ссылок
+            var lines = text.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+            int imported = 0;
+
+            foreach (var line in lines)
+            {
+                var config = _configService.ParseVlessUri(line.Trim());
+                if (config != null)
+                {
+                    Servers.Add(config);
+                    _configService.AddServer(config);
+                    imported++;
+                }
+            }
+
+            if (imported > 0)
+            {
+                LogOutput += $"[INFO] Imported {imported} server(s)\n";
+                SelectedServer = Servers.LastOrDefault();
+            }
+            else
+            {
+                LogOutput += "[INFO] No valid VLESS links found in clipboard\n";
+            }
+        }
+        catch (Exception ex)
+        {
+            LogOutput += $"[ERROR] Import failed: {ex.Message}\n";
+        }
+    }
+
+    /// <summary>
+    /// Импорт сервера из поля ввода URI
+    /// Поддерживает:
+    /// - vless:// ссылки
+    /// - https:// подписки (subscription URLs)
+    /// </summary>
+    [RelayCommand]
+    private async Task ImportFromUri()
+    {
+        if (string.IsNullOrWhiteSpace(ImportUri))
+        {
+            LogOutput += "[INFO] Please enter a VLESS URI or subscription URL\n";
+            return;
+        }
+
+        var uri = ImportUri.Trim();
+
+        // Проверяем, это подписка (http/https) или прямая ссылка (vless://)
+        if (_configService.IsSubscriptionUrl(uri))
+        {
+            await ImportFromSubscription(uri);
+        }
+        else
+        {
+            // Обычная VLESS ссылка
+            var config = _configService.ParseVlessUri(uri);
+            if (config != null)
+            {
+                Servers.Add(config);
+                _configService.AddServer(config);
+                SelectedServer = config;
+                ImportUri = "";
+                LogOutput += $"[INFO] Imported: {config.Name}\n";
+            }
+            else
+            {
+                LogOutput += "[ERROR] Invalid VLESS URI format\n";
+            }
+        }
+    }
+
+    /// <summary>
+    /// Импорт серверов из URL подписки (subscription)
+    /// </summary>
+    private async Task ImportFromSubscription(string subscriptionUrl)
+    {
+        try
+        {
+            LogOutput += $"[INFO] Fetching subscription from {subscriptionUrl}...\n";
+            
+            var configs = await _configService.FetchSubscription(subscriptionUrl);
+            
+            if (configs.Count == 0)
+            {
+                LogOutput += "[WARNING] No VLESS servers found in subscription\n";
+                return;
+            }
+
+            int imported = 0;
+            foreach (var config in configs)
+            {
+                // Проверяем, нет ли уже такого сервера (по адресу и порту)
+                var exists = Servers.Any(s => s.Address == config.Address && s.Port == config.Port);
+                if (!exists)
+                {
+                    Servers.Add(config);
+                    _configService.AddServer(config);
+                    imported++;
+                }
+            }
+
+            LogOutput += $"[INFO] Subscription loaded: {configs.Count} servers found, {imported} new added\n";
+            
+            if (imported > 0)
+            {
+                SelectedServer = Servers.LastOrDefault();
+                ImportUri = "";
+            }
+        }
+        catch (Exception ex)
+        {
+            LogOutput += $"[ERROR] Failed to fetch subscription: {ex.Message}\n";
+        }
+    }
+
+    /// <summary>
+    /// Копирование URI выбранного сервера в буфер обмена
+    /// </summary>
+    [RelayCommand]
+    private void CopyServerUri()
+    {
+        if (SelectedServer == null) return;
+        
+        var uri = _configService.GenerateVlessUri(SelectedServer);
+        Clipboard.SetText(uri);
+        LogOutput += $"[INFO] Copied URI for {SelectedServer.Name}\n";
+    }
+
+    /// <summary>
+    /// Сохранение изменений в настройках сервера
+    /// </summary>
+    [RelayCommand]
+    private void SaveServerChanges()
+    {
+        if (SelectedServer == null) return;
+        _configService.UpdateServer(SelectedServer);
+        LogOutput += $"[INFO] Saved changes for {SelectedServer.Name}\n";
+    }
+
+    /// <summary>
+    /// Очистка лога
+    /// </summary>
+    [RelayCommand]
+    private void ClearLog()
+    {
+        LogOutput = "";
+    }
+
+    // ===== Обработчики изменения свойств =====
+    // Автоматически сохраняют настройки при изменении
+
+    partial void OnLocalPortChanged(int value)
+    {
+        _configService.Settings.LocalPort = value;
+        _configService.SaveSettings();
+    }
+
+    partial void OnHttpPortChanged(int value)
+    {
+        _configService.Settings.HttpPort = value;
+        _configService.SaveSettings();
+    }
+
+    partial void OnEnableSystemProxyChanged(bool value)
+    {
+        _configService.Settings.EnableSystemProxy = value;
+        _configService.SaveSettings();
+    }
+
+    partial void OnEnableBypassChanged(bool value)
+    {
+        _configService.Settings.EnableBypass = value;
+        _configService.SaveSettings();
+    }
+
+    partial void OnBypassDomainsTextChanged(string value)
+    {
+        // Парсим текст в список доменов
+        var domains = value
+            .Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
+            .Select(d => d.Trim())
+            .Where(d => !string.IsNullOrEmpty(d))
+            .ToList();
+        
+        _configService.Settings.BypassDomains = domains;
+        _configService.SaveSettings();
+    }
+}
