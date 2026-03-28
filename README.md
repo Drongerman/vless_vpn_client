@@ -160,7 +160,7 @@ dotnet run
 
 ### Шаг 3: Релизная сборка (один .exe, self-contained)
 
-Нужен [.NET 8 SDK](https://dotnet.microsoft.com/download). В проекте задан профиль **`Properties/PublishProfiles/Win64-SingleFile.pubxml`**: self-contained, **single-file**, вывод в **`out\dist\`** (не в `out\publish`, чтобы при повторной сборке не ловить блокировку уже запущенного `VlessVPN.exe`).
+Нужен [.NET 8 SDK](https://dotnet.microsoft.com/download). В проекте задан профиль **`Properties/PublishProfiles/Win64-SingleFile.pubxml`**: self-contained, **single-file**, вывод в **`out\publish-singlefile\`**. Так можно снова запускать `publish`, пока открыт клиент из **`out\dist\`** (или другой копии): сборка не перезаписывает тот же `VlessVPN.exe`, из которого вы работаете.
 
 ```powershell
 cd <корень-репозитория-vless_vpn_client>
@@ -169,15 +169,15 @@ dotnet publish -c Release -p:PublishProfile=Win64-SingleFile
 
 Результат:
 
-- **`out\dist\VlessVPN.exe`** — переносимый запуск;
-- **`out\dist\xray-core\`** — копируется из корневой **`xray-core\`** при publish (нужен **`xray-core\xray.exe`** в репозитории или на диске у сборщика).
+- **`out\publish-singlefile\VlessVPN.exe`** — переносимый запуск;
+- **`out\publish-singlefile\xray-core\`** — копируется из корневой **`xray-core\`** при publish (нужен **`xray-core\xray.exe`** на диске у сборщика).
 
-Перед повторным `publish` **закройте** экземпляр клиента, собранный из **той же** папки вывода, иначе возможна ошибка `The process cannot access the file ... VlessVPN.exe`.
+Чтобы обновить **`out\dist\`**, **закройте** приложение, запущенное из этой папки, и скопируйте содержимое `out\publish-singlefile\` в `out\dist\` (или `robocopy out\publish-singlefile out\dist /E`). Если публиковать **напрямую** в папку, откуда сейчас запущен `VlessVPN.exe`, снова будет ошибка `The process cannot access the file ... VlessVPN.exe`.
 
 То же без профиля (явные свойства):
 
 ```powershell
-dotnet publish -c Release -r win-x64 /p:PublishSingleFile=true /p:SelfContained=true /p:IncludeNativeLibrariesForSelfExtract=true -o out\dist
+dotnet publish -c Release -r win-x64 /p:PublishSingleFile=true /p:SelfContained=true /p:IncludeNativeLibrariesForSelfExtract=true -o out\publish-singlefile
 ```
 
 При странной иконке в exe после смены `.ico`: `dotnet clean -c Release`, затем снова `publish`.
