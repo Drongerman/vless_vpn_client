@@ -30,6 +30,23 @@
     <Delete Files="$(IntermediateOutputPath)apphost.exe" ContinueOnError="true" />
   </Target>
 
+  <!-- Копирование xray-core с диска при выполнении целей: обходит .gitignore и фильтр MSBuild, который из глоба **\* исключает .exe. -->
+  <Target Name="SyncXrayCoreToOutputDir" BeforeTargets="CopyFilesToOutputDirectory" Condition="Exists('$(MSBuildProjectDirectory)\xray-core')">
+    <MakeDir Directories="$(TargetDir)xray-core" />
+    <Exec Command="robocopy &quot;$(MSBuildProjectDirectory)\xray-core&quot; &quot;$(TargetDir)xray-core&quot; /E /XO /R:1 /W:1 /NFL /NDL /NJH /NJS /NC /NS /NP"
+          IgnoreExitCode="true" />
+  </Target>
+
+  <Target Name="SyncXrayCoreToPublishDir" BeforeTargets="CopyFilesToPublishDirectory" Condition="Exists('$(MSBuildProjectDirectory)\xray-core')">
+    <MakeDir Directories="$(PublishDir)xray-core" Condition="'$(PublishDir)' != ''" />
+    <Exec Command="robocopy &quot;$(MSBuildProjectDirectory)\xray-core&quot; &quot;$(PublishDir)xray-core&quot; /E /XO /R:1 /W:1 /NFL /NDL /NJH /NJS /NC /NS /NP"
+          IgnoreExitCode="true"
+          Condition="'$(PublishDir)' != ''" />
+    <Warning Code="VPN001"
+             Text="В $(MSBuildProjectDirectory)\xray-core нет xray.exe — положите бинарник Xray в эту папку перед publish (рядом с single-file exe)."
+             Condition="'$(PublishDir)' != '' AND !Exists('$(MSBuildProjectDirectory)\xray-core\xray.exe')" />
+  </Target>
+
   <ItemGroup>
     <PackageReference Include="CommunityToolkit.Mvvm" Version="8.2.2" />
     <PackageReference Include="Hardcodet.NotifyIcon.Wpf" Version="1.1.0" />
