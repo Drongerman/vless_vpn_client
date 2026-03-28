@@ -158,6 +158,37 @@ dotnet run
 
 Или откройте `VlessVPN.sln` в Visual Studio / Rider.
 
+### Шаг 3: Релизная сборка (один .exe, self-contained)
+
+Нужен [.NET 8 SDK](https://dotnet.microsoft.com/download). В проекте задан профиль **`Properties/PublishProfiles/Win64-SingleFile.pubxml`**: self-contained, **single-file**, вывод в **`out\dist\`** (не в `out\publish`, чтобы при повторной сборке не ловить блокировку уже запущенного `VlessVPN.exe`).
+
+```powershell
+cd <корень-репозитория-vless_vpn_client>
+dotnet publish -c Release -p:PublishProfile=Win64-SingleFile
+```
+
+Результат:
+
+- **`out\dist\VlessVPN.exe`** — переносимый запуск;
+- **`out\dist\xray-core\`** — копируется из корневой **`xray-core\`** при publish (нужен **`xray-core\xray.exe`** в репозитории или на диске у сборщика).
+
+Перед повторным `publish` **закройте** экземпляр клиента, собранный из **той же** папки вывода, иначе возможна ошибка `The process cannot access the file ... VlessVPN.exe`.
+
+То же без профиля (явные свойства):
+
+```powershell
+dotnet publish -c Release -r win-x64 /p:PublishSingleFile=true /p:SelfContained=true /p:IncludeNativeLibrariesForSelfExtract=true -o out\dist
+```
+
+При странной иконке в exe после смены `.ico`: `dotnet clean -c Release`, затем снова `publish`.
+
+Обычная отладочная сборка без single-file:
+
+```powershell
+dotnet build -c Release
+# артефакты: bin\Release\net8.0-windows\...
+```
+
 ---
 
 ## 🔧 Требования
