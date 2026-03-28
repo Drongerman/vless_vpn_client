@@ -1,6 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
+    <!-- WinExe: без отдельного консольного окна; запуск двойным щелчком по VlessVPN.exe из bin или после publish -->
     <OutputType>WinExe</OutputType>
     <TargetFramework>net8.0-windows</TargetFramework>
     <Nullable>enable</Nullable>
@@ -8,10 +9,26 @@
     <UseWPF>true</UseWPF>
     <AssemblyName>VlessVPN</AssemblyName>
     <RootNamespace>VlessVPN</RootNamespace>
-    <Version>1.0.0</Version>
     <Authors>VlessVPN</Authors>
     <Description>Windows 11 VLESS VPN Client</Description>
+    <!-- Абсолютный путь надёжнее для apphost при publish с RID -->
+    <ApplicationIcon>$(MSBuildProjectDirectory)\Assets\VlessVPN-icon.ico</ApplicationIcon>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <Version>1.0.1</Version>
   </PropertyGroup>
+
+  <!-- Один exe: dotnet publish -c Release -r win-x64 /p:PublishSingleFile=true /p:SelfContained=true -->
+  <PropertyGroup Condition="'$(PublishSingleFile)' == 'true'">
+    <SelfContained>true</SelfContained>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+  </PropertyGroup>
+
+  <!-- Иначе MSBuild может не пересобрать apphost — в single-file exe остаётся старая встроенная иконка -->
+  <Target Name="RefreshAppHostWhenPublishingSingleFile" BeforeTargets="CreateAppHost" Condition="'$(PublishSingleFile)' == 'true'">
+    <Delete Files="$(IntermediateOutputPath)$(AssemblyName).exe" ContinueOnError="true" />
+    <Delete Files="$(IntermediateOutputPath)apphost.exe" ContinueOnError="true" />
+  </Target>
 
   <ItemGroup>
     <PackageReference Include="CommunityToolkit.Mvvm" Version="8.2.2" />
@@ -22,9 +39,19 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- xray.exe часто в .gitignore — не попадает в xray-core\**; явно копируем в bin и publish -->
+    <None Include="$(MSBuildProjectDirectory)\xray-core\xray.exe" Condition="Exists('$(MSBuildProjectDirectory)\xray-core\xray.exe')">
+      <Link>xray-core\xray.exe</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </None>
     <None Update="xray-core\**">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
+    <None Include="Assets\VlessVPN-icon.svg" />
+    <None Include="Assets\VlessVPN-icon.png" />
+    <Resource Include="Assets\VlessVPN-icon.ico" />
+    <UpToDateCheckInput Include="$(MSBuildProjectDirectory)\Assets\VlessVPN-icon.ico" />
   </ItemGroup>
 
 </Project>

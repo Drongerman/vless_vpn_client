@@ -6,7 +6,8 @@
         xmlns:materialDesign="http://materialdesigninxaml.net/winfx/xaml/themes"
         xmlns:vm="clr-namespace:VlessVPN.ViewModels"
         mc:Ignorable="d"
-        Title="VlessVPN" 
+        Title="VlessVPN"
+        Icon="pack://application:,,,/Assets/VlessVPN-icon.ico"
         Height="720" Width="1100"
         MinHeight="600" MinWidth="900"
         WindowStartupLocation="CenterScreen"
@@ -81,19 +82,27 @@
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="*"/>
                                 <ColumnDefinition Width="Auto"/>
+                                <ColumnDefinition Width="Auto"/>
                             </Grid.ColumnDefinitions>
                             <TextBox Grid.Column="0" 
                                      Text="{Binding ImportUri, UpdateSourceTrigger=PropertyChanged}"
-                                     materialDesign:HintAssist.Hint="VLESS URI or subscription URL..."
+                                     materialDesign:HintAssist.Hint="VLESS URI или URL подписки (сохраняется)..."
                                      Style="{StaticResource CompactOutlinedTextBox}"
                                      FontSize="12" Height="38"
                                      materialDesign:TextFieldAssist.HasClearButton="True"/>
                             <Button Grid.Column="1" Margin="8,0,0,0"
                                     Command="{Binding ImportFromUriCommand}"
                                     Style="{StaticResource MaterialDesignIconButton}"
-                                    ToolTip="Import URI"
+                                    ToolTip="Импорт"
                                     Height="38" Width="38">
                                 <materialDesign:PackIcon Kind="Import" Width="20" Height="20"/>
+                            </Button>
+                            <Button Grid.Column="2" Margin="4,0,0,0"
+                                    Command="{Binding RefreshSubscriptionCommand}"
+                                    Style="{StaticResource MaterialDesignIconButton}"
+                                    ToolTip="Обновить подписку (тот же URL)"
+                                    Height="38" Width="38">
+                                <materialDesign:PackIcon Kind="Refresh" Width="20" Height="20"/>
                             </Button>
                         </Grid>
                         <Button Command="{Binding ImportFromClipboardCommand}"
@@ -426,6 +435,12 @@
                                           Style="{StaticResource MaterialDesignCheckBox}"
                                           Margin="0,8,0,0"/>
 
+                                <CheckBox Content="🔒 Cloudflare DNS (DoH)"
+                                          IsChecked="{Binding EnableCloudflareDns}"
+                                          Style="{StaticResource MaterialDesignCheckBox}"
+                                          ToolTip="Шифрование DNS через Cloudflare 1.1.1.1 (DNS over HTTPS)"
+                                          Margin="0,8,0,0"/>
+
                                 <Separator Margin="0,12"/>
 
                                 <!-- Bypass Settings -->
@@ -447,7 +462,7 @@
                                          FontFamily="Cascadia Code, Consolas"
                                          Height="120"
                                          Style="{StaticResource CompactOutlinedTextBox}"
-                                         ToolTip="domain:.ru - все .ru домены&#x0a;domain:vk.com - vk.com и поддомены&#x0a;geoip:private - локальные адреса"
+                                         ToolTip="domain:site.com — site.com и *.site.com&#x0a;regexp:.*\\.bongacams\\d+\\.com$ — bongacams21.com и т.п.&#x0a;geoip:private — локальные адреса"
                                          Visibility="{Binding EnableBypass, Converter={StaticResource BoolToVisibilityConverter}}"/>
 
                                 <Separator Margin="0,12"/>

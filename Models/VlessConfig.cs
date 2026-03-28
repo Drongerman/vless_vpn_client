@@ -85,6 +85,10 @@ public class VlessConfig
     /// <summary>Дата последнего подключения</summary>
     public DateTime LastConnected { get; set; }
     
+    /// <summary>Если сервер загружен из URL подписки — сам URL (для обновления списка)</summary>
+    [JsonProperty(NullValueHandling = NullValueHandling.Ignore)]
+    public string? SourceSubscriptionUrl { get; set; }
+    
     /// <summary>Возвращает адрес в формате "host:port"</summary>
     public string GetDisplayAddress() => $"{Address}:{Port}";
 }
@@ -112,6 +116,9 @@ public class AppSettings
     
     /// <summary>ID последнего подключённого сервера</summary>
     public string? LastConnectedServerId { get; set; }
+    
+    /// <summary>Последний URL подписки (импорт/обновление списка серверов)</summary>
+    public string? LastSubscriptionUrl { get; set; }
     
     /// <summary>Сворачивать в трей при закрытии</summary>
     public bool MinimizeToTray { get; set; } = true;
@@ -150,10 +157,18 @@ public class AppSettings
         "domain:telegram.org",
         "domain:t.me",
         
+        "domain:bongacams.com",
+        // CDN/зеркала в других зонах (ru13.bongacams21.com — не поддомен bongacams.com)
+        "domain:bongacams21.com",
+        "regexp:.*\\.bongacams\\d+\\.com$",
+        
         // Локальные адреса
         "geoip:private"
     };
 
     /// <summary>Включить обход прокси для указанных доменов</summary>
     public bool EnableBypass { get; set; } = true;
+
+    /// <summary>Шифровать DNS через Cloudflare (DoH 1.1.1.1)</summary>
+    public bool UseCloudflareDns { get; set; } = false;
 }

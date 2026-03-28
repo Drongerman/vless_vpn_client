@@ -1,0 +1,35 @@
+# Сборка .NET
+[Bb]in/
+[Oo]bj/
+[Ll]og/
+[Ll]ogs/
+
+# Локальные настройки IDE
+*.user
+*.userosscache
+*.suo
+
+# Publish в корень проекта (Win64-SingleFile → out/dist и т.п.)
+out/
+publish-out-test/
+
+# Visual Studio
+.vs/
+
+# VS Code (оставь launch/tasks при необходимости)
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+
+# JetBrains
+.idea/
+*.sln.iml
+
+# OS
+Thumbs.db
+Desktop.ini
+
+# Случайные .exe в репозитории не коммитим, но xray-core/xray.exe оставляем в git
+*.exe
+!xray-core/xray.exe

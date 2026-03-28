@@ -13,11 +13,13 @@
  */
 
 using System.Collections.ObjectModel;
+using System.ComponentModel;
 using System.Windows;
 using System.Windows.Threading;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using VlessVPN.Models;
+using VlessVPN;
 using VlessVPN.Services;
 
 namespace VlessVPN.ViewModels;
@@ -94,13 +96,19 @@ public partial class MainViewModel : ObservableObject
     [ObservableProperty]
     private string _bypassDomainsText = "";
 
+    /// <summary>Шифровать DNS через Cloudflare (DoH 1.1.1.1)</summary>
+    [ObservableProperty]
+    private bool _enableCloudflareDns;
+
     // Время начала подключения для расчёта длительности
     private DateTime? _connectedSince;
 
     public MainViewModel()
     {
-        // Инициализация сервисов
-        _xrayService = new XrayService();
+        // Инициализация сервисов (Xray — один экземпляр с App, иначе при выходе прокси не сбрасывается)
+        _xrayService = DesignerProperties.GetIsInDesignMode(new DependencyObject())
+            ? new XrayService()
+            : App.Xray;
         _configService = new ConfigurationService();
 
         // Загрузка настроек из файла
@@ -108,7 +116,9 @@ public partial class MainViewModel : ObservableObject
         HttpPort = _configService.Settings.HttpPort;
         EnableSystemProxy = _configService.Settings.EnableSystemProxy;
         EnableBypass = _configService.Settings.EnableBypass;
+        EnableCloudflareDns = _configService.Settings.UseCloudflareDns;
         BypassDomainsText = string.Join("\n", _configService.Settings.BypassDomains);
+        ImportUri = _configService.Settings.LastSubscriptionUrl ?? "";
 
         // Загрузка списка серверов
         foreach (var server in _configService.Settings.Servers)
@@ -391,47 +401,98 @@ public partial class MainViewModel : ObservableObject
     }
 
     /// <summary>
-    /// Импорт серверов из URL подписки (subscription)
+    /// Импорт серверов из URL подписки (subscription). Синхронизирует записи с этой подпиской:
+    /// удаляет старые серверы, ранее загруженные с того же URL, затем добавляет актуальный список.
     /// </summary>
     private async Task ImportFromSubscription(string subscriptionUrl)
     {
         try
         {
+            subscriptionUrl = subscriptionUrl.Trim();
             LogOutput += $"[INFO] Fetching subscription from {subscriptionUrl}...\n";
-            
+
             var configs = await _configService.FetchSubscription(subscriptionUrl);
-            
+
             if (configs.Count == 0)
             {
                 LogOutput += "[WARNING] No VLESS servers found in subscription\n";
                 return;
             }
 
-            int imported = 0;
-            foreach (var config in configs)
+            var toRemove = Servers
+                .Where(s => string.Equals(s.SourceSubscriptionUrl, subscriptionUrl, StringComparison.OrdinalIgnoreCase))
+                .ToList();
+            var removedIds = new HashSet<string>(toRemove.Select(s => s.Id));
+            foreach (var s in toRemove)
             {
-                // Проверяем, нет ли уже такого сервера (по адресу и порту)
-                var exists = Servers.Any(s => s.Address == config.Address && s.Port == config.Port);
-                if (!exists)
-                {
-                    Servers.Add(config);
-                    _configService.AddServer(config);
-                    imported++;
-                }
+                Servers.Remove(s);
+                _configService.RemoveServer(s.Id);
             }
 
-            LogOutput += $"[INFO] Subscription loaded: {configs.Count} servers found, {imported} new added\n";
-            
-            if (imported > 0)
+            var added = 0;
+            foreach (var config in configs)
             {
-                SelectedServer = Servers.LastOrDefault();
-                ImportUri = "";
+                config.SourceSubscriptionUrl = subscriptionUrl;
+                if (Servers.Any(x => x.Address == config.Address && x.Port == config.Port))
+                    continue;
+                Servers.Add(config);
+                _configService.AddServer(config);
+                added++;
             }
+
+            _configService.Settings.LastSubscriptionUrl = subscriptionUrl;
+
+            if (SelectedServer != null && removedIds.Contains(SelectedServer.Id))
+                SelectedServer = Servers.FirstOrDefault();
+            else
+                SelectedServer ??= Servers.FirstOrDefault();
+
+            if (!string.IsNullOrEmpty(_configService.Settings.LastConnectedServerId) &&
+                !Servers.Any(s => s.Id == _configService.Settings.LastConnectedServerId))
+            {
+                _configService.Settings.LastConnectedServerId = SelectedServer?.Id;
+            }
+
+            _configService.SaveSettings();
+            ImportUri = subscriptionUrl;
+
+            LogOutput += $"[INFO] Subscription synced: {configs.Count} server(s) in feed, {toRemove.Count} removed, {added} added\n";
         }
         catch (Exception ex)
         {
             LogOutput += $"[ERROR] Failed to fetch subscription: {ex.Message}\n";
         }
+    }
+
+    /// <summary>
+    /// Повторная загрузка списка с сохранённого URL подписки
+    /// </summary>
+    [RelayCommand]
+    private async Task RefreshSubscription()
+    {
+        var url = (ImportUri ?? "").Trim();
+        if (string.IsNullOrEmpty(url))
+            url = (_configService.Settings.LastSubscriptionUrl ?? "").Trim();
+        if (string.IsNullOrEmpty(url))
+        {
+            LogOutput += "[INFO] Укажите URL подписки в поле импорта или импортируйте подписку один раз\n";
+            return;
+        }
+
+        if (!_configService.IsSubscriptionUrl(url))
+        {
+            LogOutput += "[INFO] Обновление доступно только для URL подписки (http/https)\n";
+            return;
+        }
+
+        if (IsConnected || IsConnecting)
+        {
+            MessageBox.Show("Отключитесь от VPN перед обновлением подписки.", "VlessVPN",
+                MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+
+        await ImportFromSubscription(url);
     }
 
     /// <summary>
@@ -491,6 +552,12 @@ public partial class MainViewModel : ObservableObject
     partial void OnEnableBypassChanged(bool value)
     {
         _configService.Settings.EnableBypass = value;
+        _configService.SaveSettings();
+    }
+
+    partial void OnEnableCloudflareDnsChanged(bool value)
+    {
+        _configService.Settings.UseCloudflareDns = value;
         _configService.SaveSettings();
     }
 

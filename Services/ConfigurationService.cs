@@ -60,7 +60,9 @@ public class ConfigurationService
             if (File.Exists(_configPath))
             {
                 var json = File.ReadAllText(_configPath);
-                return JsonConvert.DeserializeObject<AppSettings>(json) ?? new AppSettings();
+                var loaded = JsonConvert.DeserializeObject<AppSettings>(json) ?? new AppSettings();
+                EnsureDefaultBypassRules(loaded);
+                return loaded;
             }
         }
         catch (Exception ex)
@@ -69,6 +71,41 @@ public class ConfigurationService
             System.Diagnostics.Debug.WriteLine($"Failed to load settings: {ex.Message}");
         }
         return new AppSettings();
+    }
+
+    /// <summary>
+    /// Добавляет новые правила обхода по умолчанию в уже сохранённые настройки (однократно после обновления приложения).
+    /// </summary>
+    private void EnsureDefaultBypassRules(AppSettings settings)
+    {
+        // Дополняем список, не заменяя пользовательские правила (уже мог быть только domain:bongacams.com)
+        var defaults = new[]
+        {
+            "domain:bongacams.com",
+            "domain:bongacams21.com",
+            "regexp:.*\\.bongacams\\d+\\.com$"
+        };
+        var added = false;
+        foreach (var rule in defaults)
+        {
+            if (settings.BypassDomains.Any(d => string.Equals(d.Trim(), rule, StringComparison.OrdinalIgnoreCase)))
+                continue;
+            settings.BypassDomains.Add(rule);
+            added = true;
+        }
+
+        if (!added)
+            return;
+
+        try
+        {
+            var json = JsonConvert.SerializeObject(settings, Formatting.Indented);
+            File.WriteAllText(_configPath, json);
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"Failed to migrate bypass rules: {ex.Message}");
+        }
     }
 
     /// <summary>

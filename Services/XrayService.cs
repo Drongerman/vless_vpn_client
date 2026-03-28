@@ -16,6 +16,7 @@
 
 using System.Diagnostics;
 using System.IO;
+using System.Threading;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using VlessVPN.Models;
@@ -27,14 +28,17 @@ public class XrayService
     // Процесс xray.exe - хранится для последующего завершения
     private Process? _xrayProcess;
     
-    // Путь к исполняемому файлу xray.exe
-    private readonly string _xrayPath;
+    // Кэш последнего найденного xray.exe (для KillOrphan)
+    private string? _lastResolvedXrayPath;
     
     // Путь к временному файлу конфигурации
     private readonly string _configPath;
     
     // Сервис настроек для получения портов и опций
     private readonly ConfigurationService _configService;
+
+    /// <summary>Сериализация Start/Stop — иначе два параллельных Connect дают два xray на одном порту.</summary>
+    private readonly SemaphoreSlim _lifecycleLock = new(1, 1);
 
     // События для уведомления UI о статусе
     public event EventHandler<string>? OutputReceived;      // Логи от xray
@@ -46,15 +50,63 @@ public class XrayService
     {
         _configService = new ConfigurationService();
         
-        // Xray должен лежать в папке xray-core рядом с приложением
-        var appDir = AppDomain.CurrentDomain.BaseDirectory;
-        _xrayPath = Path.Combine(appDir, "xray-core", "xray.exe");
-        
         // Конфигурация сохраняется в AppData (не требует прав администратора)
         var appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
         var configDir = Path.Combine(appData, "VlessVPN");
         Directory.CreateDirectory(configDir);
         _configPath = Path.Combine(configDir, "xray-config.json");
+    }
+
+    /// <summary>
+    /// Каталог, где лежит xray-core рядом с приложением (для publish single-file — папка .exe, не temp).
+    /// </summary>
+    private static string GetAppContentDirectory()
+    {
+        var baseDir = AppDomain.CurrentDomain.BaseDirectory;
+        try
+        {
+            var proc = Environment.ProcessPath;
+            if (string.IsNullOrEmpty(proc))
+                return baseDir;
+
+            var procDir = Path.GetDirectoryName(proc);
+            if (string.IsNullOrEmpty(procDir))
+                return baseDir;
+
+            if (string.Equals(Path.GetFileName(proc), "dotnet.exe", StringComparison.OrdinalIgnoreCase))
+                return baseDir;
+
+            return procDir;
+        }
+        catch
+        {
+            return baseDir;
+        }
+    }
+
+    /// <summary>Возможные расположения xray.exe (первый существующий выбирается при подключении).</summary>
+    private IEnumerable<string> EnumerateXrayCandidatePaths()
+    {
+        var appDir = GetAppContentDirectory();
+        var baseDir = AppDomain.CurrentDomain.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        var appDataDir = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+            "VlessVPN", "xray-core", "xray.exe");
+
+        yield return Path.Combine(appDir, "xray-core", "xray.exe");
+        yield return Path.Combine(baseDir, "xray-core", "xray.exe");
+        yield return appDataDir;
+    }
+
+    private string? ResolveXrayPath()
+    {
+        foreach (var p in EnumerateXrayCandidatePaths())
+        {
+            if (File.Exists(p))
+                return p;
+        }
+
+        return null;
     }
 
     /// <summary>
@@ -64,73 +116,65 @@ public class XrayService
     /// <returns>true если подключение успешно</returns>
     public async Task<bool> StartXray(VlessConfig config)
     {
-        // Если уже запущен - сначала останавливаем
-        if (_xrayProcess != null && !_xrayProcess.HasExited)
-        {
-            await StopXrayAsync();
-        }
-
+        await _lifecycleLock.WaitAsync().ConfigureAwait(false);
         try
         {
-            SetState(ConnectionState.Connecting);
-            
-            // ШАГ 1: Генерируем JSON конфигурацию для Xray
-            // Это стандартный формат конфигурации Xray-core
-            var xrayConfig = GenerateXrayConfig(config, _configService.Settings);
-            await File.WriteAllTextAsync(_configPath, xrayConfig);
+            // Всегда освобождаем порты: «осиротевший» xray после сбоя, мёртвый Process без Dispose, гонка двух Connect
+            await PrepareForFreshXrayStartAsync().ConfigureAwait(false);
 
-            // ШАГ 2: Проверяем наличие xray.exe
-            if (!File.Exists(_xrayPath))
+            SetState(ConnectionState.Connecting);
+
+            // ШАГ 1: Генерируем JSON конфигурацию для Xray
+            var xrayConfig = GenerateXrayConfig(config, _configService.Settings);
+            await File.WriteAllTextAsync(_configPath, xrayConfig).ConfigureAwait(false);
+
+            // ШАГ 2: Проверяем наличие xray.exe (рядом с .exe, в BaseDirectory или в %AppData%\VlessVPN\xray-core\)
+            var xrayPath = ResolveXrayPath();
+            if (xrayPath == null)
             {
-                OutputReceived?.Invoke(this, $"Error: Xray not found at {_xrayPath}");
-                OutputReceived?.Invoke(this, "Please download xray-core and place it in the xray-core folder.");
-                OutputReceived?.Invoke(this, "Download from: https://github.com/XTLS/Xray-core/releases");
+                OutputReceived?.Invoke(this, "Error: xray.exe not found. Checked paths:");
+                foreach (var p in EnumerateXrayCandidatePaths())
+                    OutputReceived?.Invoke(this, $"  - {p}");
+                OutputReceived?.Invoke(this, "Download Windows x64 zip from: https://github.com/XTLS/Xray-core/releases");
+                OutputReceived?.Invoke(this, "Extract xray.exe into .\\xray-core\\ next to VlessVPN.exe or into %AppData%\\VlessVPN\\xray-core\\");
                 SetState(ConnectionState.Error);
                 return false;
             }
 
+            _lastResolvedXrayPath = xrayPath;
+
             // ШАГ 3: Запускаем процесс xray.exe
-            // БЕЗОПАСНОСТЬ: CreateNoWindow=true - окно не показывается
-            // UseShellExecute=false - не использует shell, прямой запуск
             _xrayProcess = new Process
             {
                 StartInfo = new ProcessStartInfo
                 {
-                    FileName = _xrayPath,
+                    FileName = xrayPath,
                     Arguments = $"run -config \"{_configPath}\"",
-                    UseShellExecute = false,           // Прямой запуск без shell
-                    RedirectStandardOutput = true,     // Перехватываем вывод для логов
-                    RedirectStandardError = true,      // Перехватываем ошибки
-                    CreateNoWindow = true,             // Без видимого окна
-                    WorkingDirectory = Path.GetDirectoryName(_xrayPath)
+                    UseShellExecute = false,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    CreateNoWindow = true,
+                    WorkingDirectory = Path.GetDirectoryName(xrayPath)
                 },
                 EnableRaisingEvents = true
             };
 
-            // Обработчик вывода xray (для логов)
             _xrayProcess.OutputDataReceived += (s, e) =>
             {
                 if (!string.IsNullOrEmpty(e.Data))
                 {
                     OutputReceived?.Invoke(this, e.Data);
-                    // Xray пишет "started" или "listening" когда готов к работе
                     if (e.Data.Contains("started") || e.Data.Contains("listening"))
-                    {
                         SetState(ConnectionState.Connected);
-                    }
                 }
             };
 
-            // Обработчик ошибок xray
             _xrayProcess.ErrorDataReceived += (s, e) =>
             {
                 if (!string.IsNullOrEmpty(e.Data))
-                {
                     OutputReceived?.Invoke(this, $"[ERROR] {e.Data}");
-                }
             };
 
-            // Обработчик завершения процесса (если xray упал)
             _xrayProcess.Exited += (s, e) =>
             {
                 if (CurrentState != ConnectionState.Disconnecting)
@@ -140,27 +184,40 @@ public class XrayService
                 }
             };
 
-            // Запускаем процесс
             _xrayProcess.Start();
+            ChildProcessJob.TryAssign(_xrayProcess);
             _xrayProcess.BeginOutputReadLine();
             _xrayProcess.BeginErrorReadLine();
+        }
+        catch (Exception ex)
+        {
+            await DisposeXrayProcessAsync().ConfigureAwait(false);
+            KillOrphanXrayByOurExecutable();
+            OutputReceived?.Invoke(this, $"Error starting Xray: {ex.Message}");
+            SetState(ConnectionState.Error);
+            return false;
+        }
+        finally
+        {
+            _lifecycleLock.Release();
+        }
 
-            // Даём время на инициализацию
-            await Task.Delay(2000);
+        // Без удержания lock: иначе «Отключить» ждёт весь Delay; Stop может прервать ожидание и убить процесс
+        await Task.Delay(2000).ConfigureAwait(false);
 
-            // Проверяем, не упал ли процесс сразу
-            if (_xrayProcess.HasExited)
+        await _lifecycleLock.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            if (_xrayProcess == null || _xrayProcess.HasExited)
             {
+                await DisposeXrayProcessAsync().ConfigureAwait(false);
+                KillOrphanXrayByOurExecutable();
                 SetState(ConnectionState.Error);
                 return false;
             }
 
-            // ШАГ 4: Устанавливаем системный прокси (если включено в настройках)
-            // БЕЗОПАСНОСТЬ: Изменяет только HKCU (текущий пользователь), не требует админских прав
             if (_configService.Settings.EnableSystemProxy)
-            {
                 SetSystemProxy(_configService.Settings.HttpPort);
-            }
 
             SetState(ConnectionState.Connected);
             OutputReceived?.Invoke(this, $"Connected to {config.Name} ({config.Address}:{config.Port})");
@@ -168,9 +225,15 @@ public class XrayService
         }
         catch (Exception ex)
         {
+            await DisposeXrayProcessAsync().ConfigureAwait(false);
+            KillOrphanXrayByOurExecutable();
             OutputReceived?.Invoke(this, $"Error starting Xray: {ex.Message}");
             SetState(ConnectionState.Error);
             return false;
+        }
+        finally
+        {
+            _lifecycleLock.Release();
         }
     }
 
@@ -188,39 +251,146 @@ public class XrayService
     /// </summary>
     public async Task StopXrayAsync()
     {
-        SetState(ConnectionState.Disconnecting);
-        
-        // ВАЖНО: Сначала очищаем прокси, потом останавливаем процесс
-        // Это гарантирует, что интернет продолжит работать даже если что-то пойдёт не так
-        ClearSystemProxy();
-
-        if (_xrayProcess != null && !_xrayProcess.HasExited)
+        await _lifecycleLock.WaitAsync().ConfigureAwait(false);
+        try
         {
+            await StopXrayCoreAsync(notifyDisconnect: true).ConfigureAwait(false);
+        }
+        finally
+        {
+            _lifecycleLock.Release();
+        }
+    }
+
+    /// <summary>Перед новым запуском: без сообщения «Disconnected» в логе (тихая зачистка).</summary>
+    private async Task PrepareForFreshXrayStartAsync()
+    {
+        await StopXrayCoreAsync(notifyDisconnect: false).ConfigureAwait(false);
+        // Сокет может отпустить порт не мгновенно после Kill
+        await Task.Delay(150).ConfigureAwait(false);
+    }
+
+    /// <summary>Остановка процесса и сброс прокси. notifyDisconnect — обновление UI/лог при ручном отключении.</summary>
+    private async Task StopXrayCoreAsync(bool notifyDisconnect)
+    {
+        if (notifyDisconnect)
+            SetState(ConnectionState.Disconnecting);
+
+        ClearSystemProxy();
+        await DisposeXrayProcessAsync().ConfigureAwait(false);
+        KillOrphanXrayByOurExecutable();
+
+        if (notifyDisconnect)
+        {
+            SetState(ConnectionState.Disconnected);
+            OutputReceived?.Invoke(this, "Disconnected");
+        }
+    }
+
+    /// <summary>Синхронный WaitForExit: из UI-потока в OnExit async-продолжение с захватом Dispatcher давало взаимную блокировку и «зависший» xray.</summary>
+    private Task DisposeXrayProcessAsync()
+    {
+        if (_xrayProcess == null)
+            return Task.CompletedTask;
+
+        var p = _xrayProcess;
+        _xrayProcess = null;
+
+        try
+        {
+            if (!p.HasExited)
+            {
+                try
+                {
+                    p.Kill(entireProcessTree: true);
+                }
+                catch (Exception ex)
+                {
+                    OutputReceived?.Invoke(this, $"Error stopping Xray: {ex.Message}");
+                }
+            }
+
             try
             {
-                // Завершаем процесс xray и все его дочерние процессы
-                _xrayProcess.Kill(entireProcessTree: true);
-                await _xrayProcess.WaitForExitAsync();
+                p.WaitForExit(15000);
             }
             catch (Exception ex)
             {
-                OutputReceived?.Invoke(this, $"Error stopping Xray: {ex.Message}");
-            }
-            finally
-            {
-                _xrayProcess.Dispose();
-                _xrayProcess = null;
+                OutputReceived?.Invoke(this, $"Error waiting for Xray exit: {ex.Message}");
             }
         }
+        finally
+        {
+            p.Dispose();
+        }
 
-        SetState(ConnectionState.Disconnected);
-        OutputReceived?.Invoke(this, "Disconnected");
+        return Task.CompletedTask;
+    }
+
+    /// <summary>Завершает любые xray.exe с тем же путём, что наш (например после «Снять задачу» или сбоя).</summary>
+    private void KillOrphanXrayByOurExecutable()
+    {
+        var ourPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var p in EnumerateXrayCandidatePaths())
+            ourPaths.Add(Path.GetFullPath(p));
+        if (_lastResolvedXrayPath != null)
+            ourPaths.Add(Path.GetFullPath(_lastResolvedXrayPath));
+
+        try
+        {
+            foreach (var proc in Process.GetProcessesByName("xray"))
+            {
+                try
+                {
+                    string? path = null;
+                    try
+                    {
+                        path = proc.MainModule?.FileName;
+                    }
+                    catch
+                    {
+                        continue;
+                    }
+
+                    if (path == null)
+                        continue;
+                    var full = Path.GetFullPath(path);
+                    if (!ourPaths.Contains(full))
+                        continue;
+
+                    if (!proc.HasExited)
+                    {
+                        proc.Kill(entireProcessTree: true);
+                        proc.WaitForExit(5000);
+                    }
+                }
+                catch
+                {
+                    // ignore
+                }
+                finally
+                {
+                    proc.Dispose();
+                }
+            }
+        }
+        catch
+        {
+            // ignore
+        }
     }
 
     private void SetState(ConnectionState state)
     {
         CurrentState = state;
-        StateChanged?.Invoke(this, state);
+        try
+        {
+            StateChanged?.Invoke(this, state);
+        }
+        catch
+        {
+            // При выходе из приложения подписчики могут дергать уже закрывающийся Dispatcher
+        }
     }
 
     /// <summary>
@@ -295,6 +465,19 @@ public class XrayService
                 ["rules"] = CreateRoutingRules(settings)
             }
         };
+
+        // DNS over HTTPS (Cloudflare 1.1.1.1) — шифрование DNS-запросов
+        if (settings.UseCloudflareDns)
+        {
+            xrayConfig["dns"] = new JObject
+            {
+                ["servers"] = new JArray
+                {
+                    "https://1.1.1.1/dns-query",
+                    "https://1.0.0.1/dns-query"
+                }
+            };
+        }
 
         return JsonConvert.SerializeObject(xrayConfig, Formatting.Indented);
     }
