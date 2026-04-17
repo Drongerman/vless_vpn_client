@@ -179,8 +179,10 @@ public class XrayService
             {
                 if (CurrentState != ConnectionState.Disconnecting)
                 {
+                    // Kill switch: сбрасываем системный прокси при неожиданном завершении xray
+                    ClearSystemProxy();
                     SetState(ConnectionState.Error);
-                    OutputReceived?.Invoke(this, "Xray process terminated unexpectedly");
+                    OutputReceived?.Invoke(this, "Xray process terminated unexpectedly. System proxy cleared.");
                 }
             };
 
@@ -280,6 +282,10 @@ public class XrayService
         await DisposeXrayProcessAsync().ConfigureAwait(false);
         KillOrphanXrayByOurExecutable();
 
+        // Удаляем временный конфиг (содержит UUID, адреса серверов)
+        try { if (File.Exists(_configPath)) File.Delete(_configPath); }
+        catch { /* best effort */ }
+
         if (notifyDisconnect)
         {
             SetState(ConnectionState.Disconnected);
@@ -327,7 +333,11 @@ public class XrayService
         return Task.CompletedTask;
     }
 
-    /// <summary>Завершает любые xray.exe с тем же путём, что наш (например после «Снять задачу» или сбоя).</summary>
+    /// <summary>
+    /// Завершает любые xray.exe, которые могут конфликтовать:
+    /// 1) Сначала по совпадению пути (наш бинарник из любого известного расположения)
+    /// 2) Затем любые xray.exe, слушающие наши порты (fallback — ловит сирот от старых версий из другой папки)
+    /// </summary>
     private void KillOrphanXrayByOurExecutable()
     {
         var ourPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -349,19 +359,18 @@ public class XrayService
                     }
                     catch
                     {
-                        continue;
+                        // Нет доступа к MainModule — пропускаем проверку по пути,
+                        // но ниже попробуем убить по порту если нужно
                     }
 
-                    if (path == null)
-                        continue;
-                    var full = Path.GetFullPath(path);
-                    if (!ourPaths.Contains(full))
-                        continue;
-
-                    if (!proc.HasExited)
+                    if (path != null)
                     {
-                        proc.Kill(entireProcessTree: true);
-                        proc.WaitForExit(5000);
+                        var full = Path.GetFullPath(path);
+                        if (ourPaths.Contains(full) && !proc.HasExited)
+                        {
+                            proc.Kill(entireProcessTree: true);
+                            proc.WaitForExit(5000);
+                        }
                     }
                 }
                 catch
@@ -377,6 +386,65 @@ public class XrayService
         catch
         {
             // ignore
+        }
+
+        // Fallback: убиваем xray.exe, занимающий наши порты (ловит сирот из другой папки/версии)
+        KillXrayOnOurPorts();
+    }
+
+    /// <summary>
+    /// Fallback: если наши порты всё ещё заняты после path-based kill,
+    /// убиваем все оставшиеся xray.exe (сироты от старых версий / другого пути).
+    /// </summary>
+    private void KillXrayOnOurPorts()
+    {
+        // Проверяем, заняты ли наши порты
+        if (!IsPortInUse(_configService.Settings.LocalPort) &&
+            !IsPortInUse(_configService.Settings.HttpPort))
+            return;
+
+        try
+        {
+            foreach (var proc in Process.GetProcessesByName("xray"))
+            {
+                try
+                {
+                    if (!proc.HasExited)
+                    {
+                        proc.Kill(entireProcessTree: true);
+                        proc.WaitForExit(3000);
+                        OutputReceived?.Invoke(this, $"Killed orphan xray.exe (PID {proc.Id}) blocking our ports");
+                    }
+                }
+                catch
+                {
+                    // ignore
+                }
+                finally
+                {
+                    proc.Dispose();
+                }
+            }
+        }
+        catch
+        {
+            // ignore
+        }
+    }
+
+    private static bool IsPortInUse(int port)
+    {
+        try
+        {
+            using var listener = new System.Net.Sockets.TcpListener(
+                System.Net.IPAddress.Loopback, port);
+            listener.Start();
+            listener.Stop();
+            return false; // Порт свободен
+        }
+        catch (System.Net.Sockets.SocketException)
+        {
+            return true; // Порт занят
         }
     }
 
@@ -445,7 +513,7 @@ public class XrayService
             // OUTBOUNDS - куда отправляется трафик
             ["outbounds"] = new JArray
             {
-                CreateOutbound(config),               // Основной: через VPN сервер
+                CreateOutbound(config, settings),      // Основной: через VPN сервер
                 new JObject                           // Прямой: напрямую (для локальных адресов)
                 {
                     ["tag"] = "direct",
@@ -465,6 +533,72 @@ public class XrayService
                 ["rules"] = CreateRoutingRules(settings)
             }
         };
+
+        // TLS Fragment (Anti-DPI) — фрагментация ClientHello для обхода DPI
+        if (settings.EnableTlsFragment)
+        {
+            ((JArray)xrayConfig["outbounds"]!).Add(new JObject
+            {
+                ["tag"] = "fragment",
+                ["protocol"] = "freedom",
+                ["settings"] = new JObject
+                {
+                    ["fragment"] = new JObject
+                    {
+                        ["packets"] = "tlshello",
+                        ["length"] = settings.TlsFragmentLength,
+                        ["interval"] = settings.TlsFragmentInterval
+                    }
+                }
+            });
+        }
+
+        // WARP (Cloudflare WireGuard) — цепочка VLESS → WARP → Интернет
+        if (settings.EnableWarp && !string.IsNullOrWhiteSpace(settings.WarpPrivateKey))
+        {
+            var warpAddresses = new JArray();
+            if (!string.IsNullOrWhiteSpace(settings.WarpAddressV4))
+                warpAddresses.Add(settings.WarpAddressV4);
+            if (!string.IsNullOrWhiteSpace(settings.WarpAddressV6))
+                warpAddresses.Add(settings.WarpAddressV6);
+
+            var warpOutbound = new JObject
+            {
+                ["tag"] = "warp",
+                ["protocol"] = "wireguard",
+                ["settings"] = new JObject
+                {
+                    ["secretKey"] = settings.WarpPrivateKey,
+                    ["address"] = warpAddresses,
+                    ["peers"] = new JArray
+                    {
+                        new JObject
+                        {
+                            ["publicKey"] = "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=",
+                            ["allowedIPs"] = new JArray { "0.0.0.0/0", "::/0" },
+                            ["endpoint"] = settings.WarpEndpoint
+                        }
+                    },
+                    ["mtu"] = 1280
+                },
+                // Цепочка: WARP проксирует через VLESS outbound
+                ["proxySettings"] = new JObject { ["tag"] = "proxy" }
+            };
+
+            // Парсим reserved bytes если указаны
+            if (!string.IsNullOrWhiteSpace(settings.WarpReserved))
+            {
+                var parts = settings.WarpReserved.Split(',');
+                if (parts.Length == 3 && parts.All(p => int.TryParse(p.Trim(), out _)))
+                {
+                    warpOutbound["settings"]!["reserved"] = new JArray(
+                        parts.Select(p => (object)int.Parse(p.Trim())).ToArray());
+                }
+            }
+
+            // WARP на позицию 0 — дефолтный маршрут
+            ((JArray)xrayConfig["outbounds"]!).Insert(0, warpOutbound);
+        }
 
         // DNS over HTTPS (Cloudflare 1.1.1.1) — шифрование DNS-запросов
         if (settings.UseCloudflareDns)
@@ -489,7 +623,41 @@ public class XrayService
     {
         var rules = new JArray();
 
-        // Если включён обход прокси - добавляем правила для доменов
+        // Определяем тег outbound для VPN трафика:
+        // если WARP включён, дефолтный маршрут — "warp" (позиция 0), иначе "proxy"
+        var proxyTag = (settings.EnableWarp && !string.IsNullOrWhiteSpace(settings.WarpPrivateKey))
+            ? "warp" : "proxy";
+
+        // === FORCE PROXY: домены, которые ВСЕГДА идут через VPN ===
+        // Проверяются ДО bypass-правил — первое совпадение побеждает.
+        // Решает проблему: domain:.ru ловит google.ru, geoip:ru ловит Google CDN в России.
+        if (settings.EnableForceProxy && settings.ForceProxyDomains.Count > 0)
+        {
+            var forceProxyDomains = new JArray();
+            foreach (var rule in settings.ForceProxyDomains)
+            {
+                if (string.IsNullOrWhiteSpace(rule) || rule.StartsWith("geoip:"))
+                    continue;
+
+                if (rule.StartsWith("domain:") || rule.StartsWith("full:") ||
+                    rule.StartsWith("regexp:") || rule.StartsWith("geosite:"))
+                    forceProxyDomains.Add(rule);
+                else
+                    forceProxyDomains.Add($"domain:{rule}");
+            }
+
+            if (forceProxyDomains.Count > 0)
+            {
+                rules.Add(new JObject
+                {
+                    ["type"] = "field",
+                    ["domain"] = forceProxyDomains,
+                    ["outboundTag"] = proxyTag
+                });
+            }
+        }
+
+        // === BYPASS: домены, которые идут напрямую (мимо VPN) ===
         if (settings.EnableBypass && settings.BypassDomains.Count > 0)
         {
             // Разделяем домены и IP-правила
@@ -567,7 +735,7 @@ public class XrayService
     /// <summary>
     /// Создаёт конфигурацию исходящего подключения VLESS
     /// </summary>
-    private JObject CreateOutbound(VlessConfig config)
+    private JObject CreateOutbound(VlessConfig config, AppSettings settings)
     {
         var outbound = new JObject
         {
@@ -657,6 +825,17 @@ public class XrayService
                     ["header"] = new JObject { ["type"] = "none" }
                 };
                 break;
+        }
+
+        // TLS Fragment: направляем TCP через fragment dialer
+        if (settings.EnableTlsFragment)
+        {
+            streamSettings["sockopt"] = new JObject
+            {
+                ["dialerProxy"] = "fragment",
+                ["tcpKeepAliveIdle"] = 100,
+                ["tcpNoDelay"] = true
+            };
         }
 
         outbound["streamSettings"] = streamSettings;

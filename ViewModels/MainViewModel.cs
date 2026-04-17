@@ -88,6 +88,14 @@ public partial class MainViewModel : ObservableObject
     [ObservableProperty]
     private string _importUri = "";
 
+    /// <summary>Включить принудительный VPN для указанных доменов</summary>
+    [ObservableProperty]
+    private bool _enableForceProxy;
+
+    /// <summary>Текст со списком доменов для принудительного VPN (по одному на строку)</summary>
+    [ObservableProperty]
+    private string _forceProxyDomainsText = "";
+
     /// <summary>Включить обход прокси для определённых доменов</summary>
     [ObservableProperty]
     private bool _enableBypass;
@@ -99,6 +107,46 @@ public partial class MainViewModel : ObservableObject
     /// <summary>Шифровать DNS через Cloudflare (DoH 1.1.1.1)</summary>
     [ObservableProperty]
     private bool _enableCloudflareDns;
+
+    // ===== TLS Fragment (Anti-DPI) =====
+
+    /// <summary>Включить фрагментацию TLS ClientHello</summary>
+    [ObservableProperty]
+    private bool _enableTlsFragment;
+
+    /// <summary>Диапазон длины фрагментов</summary>
+    [ObservableProperty]
+    private string _tlsFragmentLength = "100-200";
+
+    /// <summary>Диапазон интервала между фрагментами</summary>
+    [ObservableProperty]
+    private string _tlsFragmentInterval = "10-20";
+
+    // ===== WARP (Cloudflare WireGuard) =====
+
+    /// <summary>Включить WARP</summary>
+    [ObservableProperty]
+    private bool _enableWarp;
+
+    /// <summary>WireGuard private key</summary>
+    [ObservableProperty]
+    private string _warpPrivateKey = "";
+
+    /// <summary>WARP IPv4 адрес</summary>
+    [ObservableProperty]
+    private string _warpAddressV4 = "172.16.0.2/32";
+
+    /// <summary>WARP IPv6 адрес</summary>
+    [ObservableProperty]
+    private string _warpAddressV6 = "";
+
+    /// <summary>WARP reserved bytes</summary>
+    [ObservableProperty]
+    private string _warpReserved = "";
+
+    /// <summary>WARP endpoint</summary>
+    [ObservableProperty]
+    private string _warpEndpoint = "engage.cloudflareclient.com:2408";
 
     // Время начала подключения для расчёта длительности
     private DateTime? _connectedSince;
@@ -117,6 +165,17 @@ public partial class MainViewModel : ObservableObject
         EnableSystemProxy = _configService.Settings.EnableSystemProxy;
         EnableBypass = _configService.Settings.EnableBypass;
         EnableCloudflareDns = _configService.Settings.UseCloudflareDns;
+        EnableForceProxy = _configService.Settings.EnableForceProxy;
+        ForceProxyDomainsText = string.Join("\n", _configService.Settings.ForceProxyDomains);
+        EnableTlsFragment = _configService.Settings.EnableTlsFragment;
+        TlsFragmentLength = _configService.Settings.TlsFragmentLength;
+        TlsFragmentInterval = _configService.Settings.TlsFragmentInterval;
+        EnableWarp = _configService.Settings.EnableWarp;
+        WarpPrivateKey = _configService.Settings.WarpPrivateKey;
+        WarpAddressV4 = _configService.Settings.WarpAddressV4;
+        WarpAddressV6 = _configService.Settings.WarpAddressV6;
+        WarpReserved = _configService.Settings.WarpReserved;
+        WarpEndpoint = _configService.Settings.WarpEndpoint;
         BypassDomainsText = string.Join("\n", _configService.Settings.BypassDomains);
         ImportUri = _configService.Settings.LastSubscriptionUrl ?? "";
 
@@ -135,15 +194,20 @@ public partial class MainViewModel : ObservableObject
 
         // Подписка на события от XrayService
         
-        // Получение логов от xray
+        // Получение логов от xray.
+        // BeginInvoke, а не Invoke: при выходе App.OnExit ждёт StopXray на UI-потоке,
+        // а StopXray синхронно поднимает это событие. Invoke() ждал бы UI-поток,
+        // которого в этот момент нет → зависание процесса на выходе (процесс остаётся
+        // висеть в Диспетчере задач). BeginInvoke безопасно игнорируется при завершении.
         _xrayService.OutputReceived += (s, msg) =>
         {
-            // Обновление UI должно происходить в UI потоке
-            Application.Current.Dispatcher.Invoke(() =>
+            var dispatcher = Application.Current?.Dispatcher;
+            if (dispatcher == null || dispatcher.HasShutdownStarted || dispatcher.HasShutdownFinished)
+                return;
+            dispatcher.BeginInvoke(() =>
             {
                 LogOutput += $"[{DateTime.Now:HH:mm:ss}] {msg}\n";
-                
-                // Ограничиваем размер лога чтобы не переполнить память
+
                 if (LogOutput.Length > 50000)
                 {
                     LogOutput = LogOutput.Substring(LogOutput.Length - 40000);
@@ -154,7 +218,10 @@ public partial class MainViewModel : ObservableObject
         // Изменение состояния подключения
         _xrayService.StateChanged += (s, state) =>
         {
-            Application.Current.Dispatcher.Invoke(() =>
+            var dispatcher = Application.Current?.Dispatcher;
+            if (dispatcher == null || dispatcher.HasShutdownStarted || dispatcher.HasShutdownFinished)
+                return;
+            dispatcher.BeginInvoke(() =>
             {
                 ConnectionState = state;
                 UpdateStatusFromState(state);
@@ -411,7 +478,20 @@ public partial class MainViewModel : ObservableObject
             subscriptionUrl = subscriptionUrl.Trim();
             LogOutput += $"[INFO] Fetching subscription from {subscriptionUrl}...\n";
 
-            var configs = await _configService.FetchSubscription(subscriptionUrl);
+            // Сохраняем URL сразу, до фетча. Иначе при ошибке сети (например,
+            // недоступный сервер подписки) URL не попадёт в settings.json и
+            // исчезнет из поля после рестарта приложения.
+            if (!string.Equals(_configService.Settings.LastSubscriptionUrl, subscriptionUrl, StringComparison.Ordinal))
+            {
+                _configService.Settings.LastSubscriptionUrl = subscriptionUrl;
+                _configService.SaveSettings();
+            }
+            ImportUri = subscriptionUrl;
+
+            // Если VPN подключён — тянем подписку через наш же HTTP-прокси.
+            // Это обходит блокировку сервера подписки провайдером (симптом: 502).
+            var viaProxy = IsConnected ? $"http://127.0.0.1:{HttpPort}" : null;
+            var configs = await _configService.FetchSubscription(subscriptionUrl, viaProxy);
 
             if (configs.Count == 0)
             {
@@ -485,13 +565,15 @@ public partial class MainViewModel : ObservableObject
             return;
         }
 
-        if (IsConnected || IsConnecting)
+        if (IsConnecting)
         {
-            MessageBox.Show("Отключитесь от VPN перед обновлением подписки.", "VlessVPN",
+            MessageBox.Show("Дождитесь окончания подключения, затем обновите подписку.", "VlessVPN",
                 MessageBoxButton.OK, MessageBoxImage.Information);
             return;
         }
 
+        // При включённом VPN обновление идёт через локальный HTTP-прокси (обход блокировок).
+        // Активное подключение при этом не прерывается — меняется только список серверов.
         await ImportFromSubscription(url);
     }
 
@@ -533,12 +615,24 @@ public partial class MainViewModel : ObservableObject
 
     partial void OnLocalPortChanged(int value)
     {
+        if (value < 1 || value > 65535) return;
+        if (value == HttpPort)
+        {
+            LogOutput += $"[{DateTime.Now:HH:mm:ss}] [WARNING] SOCKS5 and HTTP ports must be different\n";
+            return;
+        }
         _configService.Settings.LocalPort = value;
         _configService.SaveSettings();
     }
 
     partial void OnHttpPortChanged(int value)
     {
+        if (value < 1 || value > 65535) return;
+        if (value == LocalPort)
+        {
+            LogOutput += $"[{DateTime.Now:HH:mm:ss}] [WARNING] HTTP and SOCKS5 ports must be different\n";
+            return;
+        }
         _configService.Settings.HttpPort = value;
         _configService.SaveSettings();
     }
@@ -546,6 +640,24 @@ public partial class MainViewModel : ObservableObject
     partial void OnEnableSystemProxyChanged(bool value)
     {
         _configService.Settings.EnableSystemProxy = value;
+        _configService.SaveSettings();
+    }
+
+    partial void OnEnableForceProxyChanged(bool value)
+    {
+        _configService.Settings.EnableForceProxy = value;
+        _configService.SaveSettings();
+    }
+
+    partial void OnForceProxyDomainsTextChanged(string value)
+    {
+        var domains = value
+            .Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
+            .Select(d => d.Trim())
+            .Where(d => !string.IsNullOrEmpty(d))
+            .ToList();
+
+        _configService.Settings.ForceProxyDomains = domains;
         _configService.SaveSettings();
     }
 
@@ -559,18 +671,77 @@ public partial class MainViewModel : ObservableObject
     {
         _configService.Settings.UseCloudflareDns = value;
         _configService.SaveSettings();
+        if (!value)
+            LogOutput += $"[{DateTime.Now:HH:mm:ss}] [WARNING] DNS encryption disabled. DNS queries may be visible to your ISP.\n";
     }
 
     partial void OnBypassDomainsTextChanged(string value)
     {
-        // Парсим текст в список доменов
         var domains = value
             .Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
             .Select(d => d.Trim())
             .Where(d => !string.IsNullOrEmpty(d))
             .ToList();
-        
+
         _configService.Settings.BypassDomains = domains;
+        _configService.SaveSettings();
+    }
+
+    // ===== TLS Fragment =====
+
+    partial void OnEnableTlsFragmentChanged(bool value)
+    {
+        _configService.Settings.EnableTlsFragment = value;
+        _configService.SaveSettings();
+    }
+
+    partial void OnTlsFragmentLengthChanged(string value)
+    {
+        _configService.Settings.TlsFragmentLength = value;
+        _configService.SaveSettings();
+    }
+
+    partial void OnTlsFragmentIntervalChanged(string value)
+    {
+        _configService.Settings.TlsFragmentInterval = value;
+        _configService.SaveSettings();
+    }
+
+    // ===== WARP =====
+
+    partial void OnEnableWarpChanged(bool value)
+    {
+        _configService.Settings.EnableWarp = value;
+        _configService.SaveSettings();
+    }
+
+    partial void OnWarpPrivateKeyChanged(string value)
+    {
+        _configService.Settings.WarpPrivateKey = value;
+        _configService.SaveSettings();
+    }
+
+    partial void OnWarpAddressV4Changed(string value)
+    {
+        _configService.Settings.WarpAddressV4 = value;
+        _configService.SaveSettings();
+    }
+
+    partial void OnWarpAddressV6Changed(string value)
+    {
+        _configService.Settings.WarpAddressV6 = value;
+        _configService.SaveSettings();
+    }
+
+    partial void OnWarpReservedChanged(string value)
+    {
+        _configService.Settings.WarpReserved = value;
+        _configService.SaveSettings();
+    }
+
+    partial void OnWarpEndpointChanged(string value)
+    {
+        _configService.Settings.WarpEndpoint = value;
         _configService.SaveSettings();
     }
 }

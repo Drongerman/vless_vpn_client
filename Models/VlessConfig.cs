@@ -127,6 +127,121 @@ public class AppSettings
     public List<VlessConfig> Servers { get; set; } = new();
 
     /// <summary>
+    /// Список доменов, которые ВСЕГДА идут через VPN (даже если попадают под bypass).
+    /// Правила проверяются ДО bypass-списка — первое совпадение побеждает.
+    /// Это решает проблему: domain:.ru ловит google.ru, geoip:ru ловит Google CDN в России.
+    /// </summary>
+    public List<string> ForceProxyDomains { get; set; } = new()
+    {
+        // ===== Google / YouTube =====
+        "domain:google.com",
+        "domain:google.ru",
+        "domain:google.co.uk",
+        "domain:google.de",
+        "domain:googleapis.com",
+        "domain:googlevideo.com",
+        "domain:googleusercontent.com",
+        "domain:googleadservices.com",
+        "domain:googlesyndication.com",
+        "domain:googletagmanager.com",
+        "domain:google-analytics.com",
+        "domain:gstatic.com",
+        "domain:ggpht.com",
+        "domain:youtube.com",
+        "domain:youtube.ru",
+        "domain:youtu.be",
+        "domain:ytimg.com",
+        "domain:youtube-nocookie.com",
+        "domain:youtube-ui.l.google.com",
+
+        // ===== Google AI / Gemini =====
+        "domain:gemini.google.com",
+        "domain:aistudio.google.com",
+        "domain:generativelanguage.googleapis.com",
+        "domain:alkalimakersuite-pa.clients6.google.com",
+        "domain:makersuite.google.com",
+        "domain:ai.google.dev",
+        "domain:deepmind.google",
+        "domain:deepmind.com",
+
+        // ===== Anthropic / Claude =====
+        "domain:anthropic.com",
+        "domain:claude.ai",
+        "domain:claude.com",
+
+        // ===== OpenAI / ChatGPT =====
+        "domain:openai.com",
+        "domain:chatgpt.com",
+        "domain:oaiusercontent.com",
+        "domain:oaistatic.com",
+
+        // ===== Meta / Instagram / Facebook =====
+        "domain:instagram.com",
+        "domain:cdninstagram.com",
+        "domain:facebook.com",
+        "domain:facebook.net",
+        "domain:fbcdn.net",
+        "domain:fb.com",
+        "domain:fb.me",
+        "domain:threads.net",
+        "domain:whatsapp.com",
+        "domain:whatsapp.net",
+
+        // ===== X (Twitter) =====
+        "domain:twitter.com",
+        "domain:x.com",
+        "domain:twimg.com",
+        "domain:t.co",
+
+        // ===== Spotify =====
+        "domain:spotify.com",
+        "domain:spotifycdn.com",
+        "domain:scdn.co",
+
+        // ===== Discord =====
+        "domain:discord.com",
+        "domain:discord.gg",
+        "domain:discordapp.com",
+        "domain:discordapp.net",
+        "domain:discord.media",
+
+        // ===== GitHub / Dev =====
+        "domain:github.com",
+        "domain:github.io",
+        "domain:githubusercontent.com",
+        "domain:githubassets.com",
+        "domain:npmjs.com",
+        "domain:npmjs.org",
+
+        // ===== Netflix =====
+        "domain:netflix.com",
+        "domain:nflxvideo.net",
+        "domain:nflximg.net",
+        "domain:nflxext.com",
+
+        // ===== Другие заблокированные / нужные через VPN =====
+        "domain:medium.com",
+        "domain:notion.so",
+        "domain:notion.site",
+        "domain:linkedin.com",
+        "domain:licdn.com",
+        "domain:soundcloud.com",
+        "domain:twitch.tv",
+        "domain:jtvnw.net",
+        "domain:twitchcdn.net",
+        "domain:pinterest.com",
+        "domain:pinimg.com",
+        "domain:quora.com",
+        "domain:reddit.com",
+        "domain:redd.it",
+        "domain:redditstatic.com",
+        "domain:redditmedia.com",
+    };
+
+    /// <summary>Включить принудительный VPN для указанных доменов</summary>
+    public bool EnableForceProxy { get; set; } = true;
+
+    /// <summary>
     /// Список доменов для прямого подключения (bypass proxy)
     /// Поддерживает:
     /// - Полные домены: vk.com, telegram.org
@@ -135,34 +250,139 @@ public class AppSettings
     /// </summary>
     public List<string> BypassDomains { get; set; } = new()
     {
-        // Российские домены
+        // ===== Российские TLD =====
         "domain:.ru",
-        "domain:.su", 
+        "domain:.su",
         "domain:.рф",
         "domain:.москва",
         "domain:.дети",
-        
-        // Популярные российские сервисы
-        "domain:vk.com",
-        "domain:vkontakte.ru",
-        "domain:mail.ru",
+        "domain:.tatar",
+
+        // ===== GeoIP: весь российский трафик напрямую =====
+        "geoip:ru",
+
+        // ===== Яндекс (все сервисы, включая .com домены) =====
         "domain:yandex.ru",
         "domain:yandex.com",
+        "domain:yandex.net",
+        "domain:yandex.by",
+        "domain:yandex.kz",
+        "domain:yandex.uz",
         "domain:ya.ru",
+        "domain:yastatic.net",
+        "domain:yandexcloud.net",
+        "domain:yandex-team.ru",
+        "domain:yx.tld",
+
+        // ===== VK / Mail.ru Group =====
+        "domain:vk.com",
+        "domain:vk.me",
+        "domain:vk.cc",
+        "domain:vkontakte.ru",
+        "domain:vkuser.net",
+        "domain:vkuseraudio.net",
+        "domain:vkuservideo.net",
+        "domain:userapi.com",
+        "domain:mail.ru",
+        "domain:mymail.ru",
+        "domain:mradx.net",
+        "domain:imgsmail.ru",
         "domain:ok.ru",
-        "domain:sberbank.ru",
-        "domain:gosuslugi.ru",
-        
-        // Telegram (если нужен прямой доступ)
+        "domain:odkl.ru",
+        "domain:okcdn.ru",
+        "domain:mycdn.me",
+        "domain:dzen.ru",
+
+        // ===== Telegram =====
         "domain:telegram.org",
         "domain:t.me",
-        
+        "domain:telegram.me",
+        "domain:telegra.ph",
+        "domain:tdesktop.com",
+        "domain:telesco.pe",
+
+        // ===== Госсервисы =====
+        "domain:gosuslugi.ru",
+        "domain:mos.ru",
+        "domain:government.ru",
+        "domain:kremlin.ru",
+        "domain:nalog.ru",
+        "domain:pfr.gov.ru",
+        "domain:esia.gosuslugi.ru",
+
+        // ===== Банки =====
+        "domain:sberbank.ru",
+        "domain:sber.ru",
+        "domain:online.sberbank.ru",
+        "domain:tinkoff.ru",
+        "domain:tbank.ru",
+        "domain:vtb.ru",
+        "domain:alfabank.ru",
+        "domain:raiffeisen.ru",
+        "domain:gazprombank.ru",
+        "domain:open.ru",
+        "domain:rshb.ru",
+        "domain:psbank.ru",
+        "domain:sovcombank.ru",
+        "domain:unicreditbank.ru",
+        "domain:rosbank.ru",
+        "domain:mkb.ru",
+        "domain:ozon.ru",
+
+        // ===== Маркетплейсы и ритейл =====
+        "domain:wildberries.ru",
+        "domain:wb.ru",
+        "domain:wbstatic.net",
+        "domain:ozon.ru",
+        "domain:ozoncdn.com",
+        "domain:ozontech.ru",
+        "domain:dns-shop.ru",
+        "domain:mvideo.ru",
+        "domain:eldorado.ru",
+        "domain:citilink.ru",
+        "domain:lamoda.ru",
+        "domain:avito.ru",
+        "domain:youla.ru",
+        "domain:aliexpress.ru",
+
+        // ===== Стриминг и медиа (РФ) =====
+        "domain:kinopoisk.ru",
+        "domain:ivi.ru",
+        "domain:okko.tv",
+        "domain:more.tv",
+        "domain:wink.ru",
+        "domain:premier.one",
+        "domain:start.ru",
+        "domain:amediateka.ru",
+        "domain:rutube.ru",
+
+        // ===== Доставка и такси =====
+        "domain:delivery-club.ru",
+        "domain:sbermarket.ru",
+        "domain:samokat.ru",
+        "domain:lavka.yandex.ru",
+
+        // ===== Прочие российские сервисы =====
+        "domain:2gis.ru",
+        "domain:2gis.com",
+        "domain:hh.ru",
+        "domain:habr.com",
+        "domain:pikabu.ru",
+        "domain:rbc.ru",
+        "domain:lenta.ru",
+        "domain:ria.ru",
+        "domain:tass.ru",
+        "domain:kommersant.ru",
+        "domain:vedomosti.ru",
+        "domain:sports.ru",
+        "domain:championat.com",
+
+        // ===== Контент для взрослых =====
         "domain:bongacams.com",
-        // CDN/зеркала в других зонах (ru13.bongacams21.com — не поддомен bongacams.com)
         "domain:bongacams21.com",
         "regexp:.*\\.bongacams\\d+\\.com$",
-        
-        // Локальные адреса
+
+        // ===== Локальные/приватные адреса =====
         "geoip:private"
     };
 
@@ -170,5 +390,36 @@ public class AppSettings
     public bool EnableBypass { get; set; } = true;
 
     /// <summary>Шифровать DNS через Cloudflare (DoH 1.1.1.1)</summary>
-    public bool UseCloudflareDns { get; set; } = false;
+    public bool UseCloudflareDns { get; set; } = true;
+
+    // ===== TLS Fragment (Anti-DPI) =====
+
+    /// <summary>Включить фрагментацию TLS ClientHello (обход DPI)</summary>
+    public bool EnableTlsFragment { get; set; } = false;
+
+    /// <summary>Диапазон длины фрагментов (например "100-200")</summary>
+    public string TlsFragmentLength { get; set; } = "100-200";
+
+    /// <summary>Диапазон интервала между фрагментами в мс (например "10-20")</summary>
+    public string TlsFragmentInterval { get; set; } = "10-20";
+
+    // ===== WARP (Cloudflare WireGuard) =====
+
+    /// <summary>Включить цепочку через WARP (трафик идёт: VLESS сервер → WARP → Интернет)</summary>
+    public bool EnableWarp { get; set; } = false;
+
+    /// <summary>WireGuard private key для WARP</summary>
+    public string WarpPrivateKey { get; set; } = string.Empty;
+
+    /// <summary>WARP IPv4 адрес (например "172.16.0.2/32")</summary>
+    public string WarpAddressV4 { get; set; } = "172.16.0.2/32";
+
+    /// <summary>WARP IPv6 адрес</summary>
+    public string WarpAddressV6 { get; set; } = string.Empty;
+
+    /// <summary>WARP reserved bytes (3 числа через запятую, например "0,0,0")</summary>
+    public string WarpReserved { get; set; } = string.Empty;
+
+    /// <summary>WARP endpoint (по умолчанию: engage.cloudflareclient.com:2408)</summary>
+    public string WarpEndpoint { get; set; } = "engage.cloudflareclient.com:2408";
 }

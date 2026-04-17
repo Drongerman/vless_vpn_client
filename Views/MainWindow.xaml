@@ -363,11 +363,17 @@
                                     <TextBox Text="{Binding SelectedServer.ShortId, UpdateSourceTrigger=PropertyChanged}"
                                              Style="{StaticResource CompactOutlinedTextBox}" Height="38"/>
                                 </StackPanel>
-                                <Button Grid.Row="2" Grid.Column="2" Margin="8,16,0,0"
-                                        Command="{Binding SaveServerChangesCommand}"
-                                        Content="💾 Save Changes"
-                                        Style="{StaticResource MaterialDesignOutlinedButton}"
-                                        Height="38"/>
+                                <StackPanel Grid.Row="2" Grid.Column="2" Margin="8,0,0,0">
+                                    <CheckBox Content="Allow Insecure (UNSAFE)"
+                                              IsChecked="{Binding SelectedServer.AllowInsecure}"
+                                              Foreground="#F85149"
+                                              ToolTip="Allows invalid TLS certificates. Only enable for testing — exposes traffic to MITM attacks."
+                                              Margin="0,0,0,4"/>
+                                    <Button Command="{Binding SaveServerChangesCommand}"
+                                            Content="💾 Save Changes"
+                                            Style="{StaticResource MaterialDesignOutlinedButton}"
+                                            Height="38"/>
+                                </StackPanel>
                             </Grid>
                         </Expander>
                     </Grid>
@@ -440,6 +446,83 @@
                                           Style="{StaticResource MaterialDesignCheckBox}"
                                           ToolTip="Шифрование DNS через Cloudflare 1.1.1.1 (DNS over HTTPS)"
                                           Margin="0,8,0,0"/>
+
+                                <Separator Margin="0,12"/>
+
+                                <!-- Anti-DPI -->
+                                <TextBlock Text="Anti-DPI" FontSize="12" FontWeight="SemiBold" Margin="0,0,0,8"/>
+
+                                <CheckBox Content="TLS Fragment"
+                                          IsChecked="{Binding EnableTlsFragment}"
+                                          Style="{StaticResource MaterialDesignCheckBox}"
+                                          ToolTip="Фрагментация TLS ClientHello для обхода DPI. Включите, если соединение блокируется."
+                                          Margin="0,4,0,8"/>
+
+                                <StackPanel Visibility="{Binding EnableTlsFragment, Converter={StaticResource BoolToVisibilityConverter}}">
+                                    <TextBlock Text="Length range" FontSize="10" Foreground="{StaticResource TextSecondaryBrush}" Margin="0,0,0,4"/>
+                                    <TextBox Text="{Binding TlsFragmentLength, UpdateSourceTrigger=PropertyChanged}"
+                                             Style="{StaticResource CompactOutlinedTextBox}" Height="34" FontSize="11" Margin="0,0,0,8"/>
+                                    <TextBlock Text="Interval range (ms)" FontSize="10" Foreground="{StaticResource TextSecondaryBrush}" Margin="0,0,0,4"/>
+                                    <TextBox Text="{Binding TlsFragmentInterval, UpdateSourceTrigger=PropertyChanged}"
+                                             Style="{StaticResource CompactOutlinedTextBox}" Height="34" FontSize="11"/>
+                                </StackPanel>
+
+                                <Separator Margin="0,12"/>
+
+                                <!-- WARP -->
+                                <TextBlock Text="WARP (Cloudflare)" FontSize="12" FontWeight="SemiBold" Margin="0,0,0,8"/>
+
+                                <CheckBox Content="Enable WARP"
+                                          IsChecked="{Binding EnableWarp}"
+                                          Style="{StaticResource MaterialDesignCheckBox}"
+                                          ToolTip="Цепочка трафика через Cloudflare WARP после VLESS сервера. Помогает обходить блокировки по IP датацентра."
+                                          Margin="0,4,0,8"/>
+
+                                <StackPanel Visibility="{Binding EnableWarp, Converter={StaticResource BoolToVisibilityConverter}}">
+                                    <TextBlock Text="Private Key" FontSize="10" Foreground="{StaticResource TextSecondaryBrush}" Margin="0,0,0,4"/>
+                                    <TextBox Text="{Binding WarpPrivateKey, UpdateSourceTrigger=PropertyChanged}"
+                                             Style="{StaticResource CompactOutlinedTextBox}" Height="34" FontSize="10" Margin="0,0,0,8"/>
+
+                                    <TextBlock Text="IPv4 Address" FontSize="10" Foreground="{StaticResource TextSecondaryBrush}" Margin="0,0,0,4"/>
+                                    <TextBox Text="{Binding WarpAddressV4, UpdateSourceTrigger=PropertyChanged}"
+                                             Style="{StaticResource CompactOutlinedTextBox}" Height="34" FontSize="10" Margin="0,0,0,8"/>
+
+                                    <TextBlock Text="IPv6 Address" FontSize="10" Foreground="{StaticResource TextSecondaryBrush}" Margin="0,0,0,4"/>
+                                    <TextBox Text="{Binding WarpAddressV6, UpdateSourceTrigger=PropertyChanged}"
+                                             Style="{StaticResource CompactOutlinedTextBox}" Height="34" FontSize="10" Margin="0,0,0,8"/>
+
+                                    <TextBlock Text="Reserved (e.g. 0,0,0)" FontSize="10" Foreground="{StaticResource TextSecondaryBrush}" Margin="0,0,0,4"/>
+                                    <TextBox Text="{Binding WarpReserved, UpdateSourceTrigger=PropertyChanged}"
+                                             Style="{StaticResource CompactOutlinedTextBox}" Height="34" FontSize="10" Margin="0,0,0,8"/>
+
+                                    <TextBlock Text="Endpoint" FontSize="10" Foreground="{StaticResource TextSecondaryBrush}" Margin="0,0,0,4"/>
+                                    <TextBox Text="{Binding WarpEndpoint, UpdateSourceTrigger=PropertyChanged}"
+                                             Style="{StaticResource CompactOutlinedTextBox}" Height="34" FontSize="10"/>
+                                </StackPanel>
+
+                                <Separator Margin="0,12"/>
+
+                                <!-- Force VPN: домены, которые ВСЕГДА через VPN -->
+                                <CheckBox Content="🔒 Force VPN domains"
+                                          IsChecked="{Binding EnableForceProxy}"
+                                          Style="{StaticResource MaterialDesignCheckBox}"
+                                          ToolTip="Домены из этого списка ВСЕГДА идут через VPN, даже если попадают под bypass (domain:.ru, geoip:ru).&#x0a;Решает проблему: google.ru, YouTube CDN с российскими IP и т.п."
+                                          Margin="0,4,0,8"/>
+
+                                <TextBlock Text="Always VPN (one per line):" FontSize="10"
+                                           Foreground="{StaticResource TextSecondaryBrush}"
+                                           Margin="0,0,0,4"
+                                           Visibility="{Binding EnableForceProxy, Converter={StaticResource BoolToVisibilityConverter}}"/>
+                                <TextBox Text="{Binding ForceProxyDomainsText, UpdateSourceTrigger=PropertyChanged}"
+                                         AcceptsReturn="True"
+                                         TextWrapping="Wrap"
+                                         VerticalScrollBarVisibility="Auto"
+                                         FontSize="10"
+                                         FontFamily="Cascadia Code, Consolas"
+                                         Height="120"
+                                         Style="{StaticResource CompactOutlinedTextBox}"
+                                         ToolTip="Google, YouTube, Instagram, Claude и др. — всегда через VPN,&#x0a;даже если domain:.ru или geoip:ru хотят отправить напрямую."
+                                         Visibility="{Binding EnableForceProxy, Converter={StaticResource BoolToVisibilityConverter}}"/>
 
                                 <Separator Margin="0,12"/>
 

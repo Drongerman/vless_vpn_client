@@ -14,7 +14,10 @@
  */
 
 using System.IO;
+using System.Net;
 using System.Net.Http;
+using System.Net.Http.Headers;
+using System.Net.Sockets;
 using System.Text;
 using Newtonsoft.Json;
 using VlessVPN.Models;
@@ -62,6 +65,7 @@ public class ConfigurationService
                 var json = File.ReadAllText(_configPath);
                 var loaded = JsonConvert.DeserializeObject<AppSettings>(json) ?? new AppSettings();
                 EnsureDefaultBypassRules(loaded);
+                EnsureDefaultForceProxyRules(loaded);
                 return loaded;
             }
         }
@@ -78,12 +82,39 @@ public class ConfigurationService
     /// </summary>
     private void EnsureDefaultBypassRules(AppSettings settings)
     {
-        // Дополняем список, не заменяя пользовательские правила (уже мог быть только domain:bongacams.com)
+        // Дополняем список правилами, которые появились в новых версиях.
+        // Не заменяем пользовательские правила — только добавляем отсутствующие.
         var defaults = new[]
         {
-            "domain:bongacams.com",
-            "domain:bongacams21.com",
-            "regexp:.*\\.bongacams\\d+\\.com$"
+            // GeoIP — весь российский трафик напрямую
+            "geoip:ru",
+            // Яндекс (.com/.net домены, которые не ловятся через domain:.ru)
+            "domain:yandex.com", "domain:yandex.net", "domain:yandex.by",
+            "domain:yandex.kz", "domain:yandex.uz", "domain:yastatic.net",
+            "domain:yandexcloud.net", "domain:yx.tld",
+            // VK / Mail.ru (.com/.net/.me домены)
+            "domain:vk.com", "domain:vk.me", "domain:vk.cc",
+            "domain:vkuser.net", "domain:vkuseraudio.net", "domain:vkuservideo.net",
+            "domain:userapi.com", "domain:mymail.ru", "domain:mradx.net",
+            "domain:imgsmail.ru", "domain:odkl.ru", "domain:okcdn.ru", "domain:mycdn.me",
+            "domain:dzen.ru",
+            // Telegram
+            "domain:telegram.me", "domain:telegra.ph", "domain:tdesktop.com", "domain:telesco.pe",
+            // Банки (новые .ru уже ловятся, но для надёжности)
+            "domain:sber.ru", "domain:tbank.ru",
+            // Маркетплейсы (.com/.net домены)
+            "domain:wbstatic.net", "domain:ozoncdn.com", "domain:ozontech.ru",
+            // 2GIS
+            "domain:2gis.com",
+            // Хабр, Championat
+            "domain:habr.com", "domain:championat.com",
+            // Контент для взрослых
+            "domain:bongacams.com", "domain:bongacams21.com",
+            "regexp:.*\\.bongacams\\d+\\.com$",
+            // Стриминг
+            "domain:okko.tv", "domain:premier.one",
+            // Прочие .tatar
+            "domain:.tatar"
         };
         var added = false;
         foreach (var rule in defaults)
@@ -105,6 +136,58 @@ public class ConfigurationService
         catch (Exception ex)
         {
             System.Diagnostics.Debug.WriteLine($"Failed to migrate bypass rules: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Добавляет force-proxy правила для существующих пользователей (Google, YouTube, Instagram, Claude и т.д.).
+    /// Без этого domain:.ru ловит google.ru, а geoip:ru ловит Google CDN с российскими IP.
+    /// </summary>
+    private void EnsureDefaultForceProxyRules(AppSettings settings)
+    {
+        var defaults = new[]
+        {
+            // Google / YouTube
+            "domain:google.com", "domain:google.ru", "domain:googleapis.com",
+            "domain:googlevideo.com", "domain:googleusercontent.com", "domain:gstatic.com",
+            "domain:ggpht.com", "domain:youtube.com", "domain:youtube.ru",
+            "domain:youtu.be", "domain:ytimg.com",
+            // Google AI / Gemini
+            "domain:gemini.google.com", "domain:aistudio.google.com",
+            "domain:generativelanguage.googleapis.com", "domain:ai.google.dev",
+            // Claude / Anthropic
+            "domain:anthropic.com", "domain:claude.ai",
+            // OpenAI
+            "domain:openai.com", "domain:chatgpt.com",
+            // Meta / Instagram
+            "domain:instagram.com", "domain:cdninstagram.com",
+            "domain:facebook.com", "domain:fbcdn.net",
+            // Discord
+            "domain:discord.com", "domain:discordapp.com",
+            // GitHub
+            "domain:github.com", "domain:githubusercontent.com",
+        };
+
+        var added = false;
+        foreach (var rule in defaults)
+        {
+            if (settings.ForceProxyDomains.Any(d => string.Equals(d.Trim(), rule, StringComparison.OrdinalIgnoreCase)))
+                continue;
+            settings.ForceProxyDomains.Add(rule);
+            added = true;
+        }
+
+        if (!added)
+            return;
+
+        try
+        {
+            var json = JsonConvert.SerializeObject(settings, Formatting.Indented);
+            File.WriteAllText(_configPath, json);
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"Failed to migrate force-proxy rules: {ex.Message}");
         }
     }
 
@@ -345,28 +428,59 @@ public class ConfigurationService
     /// </summary>
     /// <param name="subscriptionUrl">URL подписки (например: https://example.com/sub/abc123)</param>
     /// <returns>Список распарсенных конфигураций</returns>
-    public async Task<List<VlessConfig>> FetchSubscription(string subscriptionUrl)
+    public async Task<List<VlessConfig>> FetchSubscription(string subscriptionUrl, string? viaHttpProxy = null)
     {
         var configs = new List<VlessConfig>();
-        
+
         try
         {
-            using var httpClient = new HttpClient();
-            httpClient.Timeout = TimeSpan.FromSeconds(30);
+            if (!TryCreateSafeSubscriptionUri(subscriptionUrl, out var safeUri, out var validationError))
+                throw new InvalidOperationException(validationError);
+
+            // Игнорируем системный HTTP_PROXY / WinINET: иначе при настроенной в Windows
+            // переменной HTTP_PROXY=127.0.0.1:10809 (это наш же локальный прокси) запрос
+            // подписки уйдёт в выключенный xray и упадёт с "Подключение не установлено".
+            // Если передан viaHttpProxy (VPN включён) — ходим через него, чтобы обойти
+            // блокировку сервера подписки провайдером (симптом: 502 Bad Gateway напрямую).
+            using var handler = new HttpClientHandler
+            {
+                AllowAutoRedirect = false,
+                UseProxy = !string.IsNullOrWhiteSpace(viaHttpProxy),
+                Proxy = string.IsNullOrWhiteSpace(viaHttpProxy) ? null : new WebProxy(viaHttpProxy)
+            };
+
+            using var httpClient = new HttpClient(handler)
+            {
+                Timeout = TimeSpan.FromSeconds(30)
+            };
+
+            // UA специально "VlessVPN/1.0", без Accept — такое сочетание пропускают все
+            // типовые панели подписок (Marzban, 3x-ui, x-ui, v2board). Chrome-UA без
+            // остальных Sec-Fetch/Accept-Language заголовков некоторые CDN/WAF помечают
+            // как "bot" и отвечают 502 Bad Gateway.
+            httpClient.DefaultRequestHeaders.UserAgent.Clear();
+            httpClient.DefaultRequestHeaders.UserAgent.ParseAdd("VlessVPN/1.0");
+
+            using var response = await httpClient.GetAsync(
+                safeUri,
+                HttpCompletionOption.ResponseHeadersRead).ConfigureAwait(false);
+
+            if (response.StatusCode is HttpStatusCode.Moved or HttpStatusCode.Redirect or HttpStatusCode.RedirectMethod or HttpStatusCode.TemporaryRedirect or HttpStatusCode.PermanentRedirect)
+                throw new InvalidOperationException("Subscription URL redirect is not allowed.");
+
+            response.EnsureSuccessStatusCode();
+
+            var responseText = await ReadResponseAsStringWithLimitAsync(
+                response,
+                maxBytes: 2 * 1024 * 1024).ConfigureAwait(false);
             
-            // Добавляем User-Agent чтобы сервер не блокировал запрос
-            httpClient.DefaultRequestHeaders.Add("User-Agent", "VlessVPN/1.0");
-            
-            // Загружаем содержимое подписки
-            var response = await httpClient.GetStringAsync(subscriptionUrl);
-            
-            if (string.IsNullOrWhiteSpace(response))
+            if (string.IsNullOrWhiteSpace(responseText))
             {
                 return configs;
             }
 
             // Пробуем декодировать base64
-            string content = TryDecodeBase64(response.Trim());
+            string content = TryDecodeBase64(responseText.Trim());
             
             // Разбиваем на строки и парсим каждую ссылку
             var lines = content.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
@@ -398,6 +512,121 @@ public class ConfigurationService
         }
 
         return configs;
+    }
+
+    private static async Task<string> ReadResponseAsStringWithLimitAsync(HttpResponseMessage response, int maxBytes)
+    {
+        var contentLength = response.Content.Headers.ContentLength;
+        if (contentLength.HasValue && contentLength.Value > maxBytes)
+            throw new InvalidOperationException($"Subscription response too large ({contentLength.Value} bytes).");
+
+        await using var stream = await response.Content.ReadAsStreamAsync().ConfigureAwait(false);
+        using var ms = new MemoryStream();
+
+        var buffer = new byte[16 * 1024];
+        while (true)
+        {
+            var read = await stream.ReadAsync(buffer, 0, buffer.Length).ConfigureAwait(false);
+            if (read <= 0)
+                break;
+
+            if (ms.Length + read > maxBytes)
+                throw new InvalidOperationException($"Subscription response too large (>{maxBytes} bytes).");
+
+            ms.Write(buffer, 0, read);
+        }
+
+        return Encoding.UTF8.GetString(ms.ToArray());
+    }
+
+    private static bool TryCreateSafeSubscriptionUri(string rawUrl, out Uri uri, out string error)
+    {
+        uri = null!;
+        error = "";
+
+        if (string.IsNullOrWhiteSpace(rawUrl))
+        {
+            error = "Subscription URL is empty.";
+            return false;
+        }
+
+        rawUrl = rawUrl.Trim();
+
+        if (!Uri.TryCreate(rawUrl, UriKind.Absolute, out var parsed))
+        {
+            error = "Invalid subscription URL.";
+            return false;
+        }
+
+        if (!string.Equals(parsed.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase))
+        {
+            error = "Only https:// subscription URLs are allowed.";
+            return false;
+        }
+
+        if (!string.IsNullOrEmpty(parsed.UserInfo))
+        {
+            error = "Subscription URL must not include credentials.";
+            return false;
+        }
+
+        var host = parsed.Host;
+        if (string.Equals(host, "localhost", StringComparison.OrdinalIgnoreCase))
+        {
+            error = "Subscription URL host 'localhost' is not allowed.";
+            return false;
+        }
+
+        // Блокируем прямые IP на loopback/private/link-local. Это снижает SSRF на локальную сеть.
+        if (IPAddress.TryParse(host, out var ip))
+        {
+            if (IsUnsafeIp(ip))
+            {
+                error = "Subscription URL must not point to local/private IP addresses.";
+                return false;
+            }
+        }
+
+        uri = parsed;
+        return true;
+    }
+
+    private static bool IsUnsafeIp(IPAddress ip)
+    {
+        if (IPAddress.IsLoopback(ip))
+            return true;
+
+        if (ip.AddressFamily == AddressFamily.InterNetwork)
+        {
+            var b = ip.GetAddressBytes();
+            // 10.0.0.0/8
+            if (b[0] == 10) return true;
+            // 127.0.0.0/8
+            if (b[0] == 127) return true;
+            // 172.16.0.0/12
+            if (b[0] == 172 && b[1] >= 16 && b[1] <= 31) return true;
+            // 192.168.0.0/16
+            if (b[0] == 192 && b[1] == 168) return true;
+            // 169.254.0.0/16 (link-local)
+            if (b[0] == 169 && b[1] == 254) return true;
+            // 100.64.0.0/10 (carrier-grade NAT)
+            if (b[0] == 100 && (b[1] >= 64 && b[1] <= 127)) return true;
+        }
+
+        if (ip.AddressFamily == AddressFamily.InterNetworkV6)
+        {
+            if (ip.IsIPv6LinkLocal || ip.IsIPv6SiteLocal)
+                return true;
+            // fc00::/7 (ULA)
+            var b = ip.GetAddressBytes();
+            if ((b[0] & 0xFE) == 0xFC)
+                return true;
+            // ::1
+            if (ip.Equals(IPAddress.IPv6Loopback))
+                return true;
+        }
+
+        return false;
     }
 
     /// <summary>
@@ -448,7 +677,6 @@ public class ConfigurationService
         if (string.IsNullOrWhiteSpace(url))
             return false;
             
-        return url.StartsWith("http://", StringComparison.OrdinalIgnoreCase) ||
-               url.StartsWith("https://", StringComparison.OrdinalIgnoreCase);
+        return url.StartsWith("https://", StringComparison.OrdinalIgnoreCase);
     }
 }
