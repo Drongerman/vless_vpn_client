@@ -148,6 +148,15 @@ public partial class MainViewModel : ObservableObject
     [ObservableProperty]
     private string _warpEndpoint = "engage.cloudflareclient.com:2408";
 
+    /// <summary>Чипы-категории для списка Bypass.</summary>
+    public ObservableCollection<CategoryToggleViewModel> BypassCategoryToggles { get; } = new();
+
+    /// <summary>Чипы-категории для списка Force Proxy.</summary>
+    public ObservableCollection<CategoryToggleViewModel> ForceProxyCategoryToggles { get; } = new();
+
+    // Флаг рекурсии: истина, пока правим текст из-за клика по чипу — иначе OnXxxTextChanged снова дернёт чипы
+    private bool _syncingCategories;
+
     // Время начала подключения для расчёта длительности
     private DateTime? _connectedSince;
 
@@ -178,6 +187,9 @@ public partial class MainViewModel : ObservableObject
         WarpEndpoint = _configService.Settings.WarpEndpoint;
         BypassDomainsText = string.Join("\n", _configService.Settings.BypassDomains);
         ImportUri = _configService.Settings.LastSubscriptionUrl ?? "";
+
+        // Инициализация чипов-категорий
+        InitializeCategoryToggles();
 
         // Загрузка списка серверов
         foreach (var server in _configService.Settings.Servers)
@@ -659,6 +671,9 @@ public partial class MainViewModel : ObservableObject
 
         _configService.Settings.ForceProxyDomains = domains;
         _configService.SaveSettings();
+
+        if (!_syncingCategories)
+            RefreshTogglesFor(domains, ForceProxyCategoryToggles);
     }
 
     partial void OnEnableBypassChanged(bool value)
@@ -685,6 +700,90 @@ public partial class MainViewModel : ObservableObject
 
         _configService.Settings.BypassDomains = domains;
         _configService.SaveSettings();
+
+        if (!_syncingCategories)
+            RefreshTogglesFor(domains, BypassCategoryToggles);
+    }
+
+    // ===== Geodata categories =====
+
+    private void InitializeCategoryToggles()
+    {
+        foreach (var cat in GeoCategories.Bypass)
+        {
+            var vm = new CategoryToggleViewModel(cat, isBypass: true)
+            {
+                OnUserToggled = OnCategoryUserToggled
+            };
+            BypassCategoryToggles.Add(vm);
+        }
+
+        foreach (var cat in GeoCategories.ForceProxy)
+        {
+            var vm = new CategoryToggleViewModel(cat, isBypass: false)
+            {
+                OnUserToggled = OnCategoryUserToggled
+            };
+            ForceProxyCategoryToggles.Add(vm);
+        }
+
+        // Исходные состояния чипов
+        RefreshTogglesFor(_configService.Settings.BypassDomains, BypassCategoryToggles);
+        RefreshTogglesFor(_configService.Settings.ForceProxyDomains, ForceProxyCategoryToggles);
+    }
+
+    /// <summary>Клик по чипу: добавить все правила категории в список или убрать.</summary>
+    private void OnCategoryUserToggled(CategoryToggleViewModel toggle, bool enabled)
+    {
+        _syncingCategories = true;
+        try
+        {
+            var text = toggle.IsBypass ? BypassDomainsText : ForceProxyDomainsText;
+            var lines = text
+                .Split(new[] { '\r', '\n' }, StringSplitOptions.None)
+                .Select(l => l.Trim())
+                .Where(l => !string.IsNullOrEmpty(l))
+                .ToList();
+
+            if (enabled)
+            {
+                var present = new HashSet<string>(lines, StringComparer.OrdinalIgnoreCase);
+                foreach (var rule in toggle.Category.Rules)
+                {
+                    if (present.Add(rule))
+                        lines.Add(rule);
+                }
+            }
+            else
+            {
+                var toRemove = new HashSet<string>(toggle.Category.Rules, StringComparer.OrdinalIgnoreCase);
+                lines = lines.Where(l => !toRemove.Contains(l)).ToList();
+            }
+
+            var newText = string.Join("\n", lines);
+            if (toggle.IsBypass)
+                BypassDomainsText = newText;
+            else
+                ForceProxyDomainsText = newText;
+        }
+        finally
+        {
+            _syncingCategories = false;
+        }
+    }
+
+    /// <summary>Синхронизирует состояние чипов из текста (чип активен = все правила категории в списке).</summary>
+    private static void RefreshTogglesFor(IEnumerable<string> rules, ObservableCollection<CategoryToggleViewModel> toggles)
+    {
+        var set = new HashSet<string>(
+            rules.Select(r => r.Trim()).Where(r => !string.IsNullOrEmpty(r)),
+            StringComparer.OrdinalIgnoreCase);
+
+        foreach (var t in toggles)
+        {
+            var active = t.Category.Rules.All(r => set.Contains(r));
+            t.SetCheckedSilently(active);
+        }
     }
 
     // ===== TLS Fragment =====

@@ -12,6 +12,7 @@
 # Publish в корень проекта (Win64-SingleFile → out/dist и т.п.)
 out/
 publish-out-test/
+release/
 
 # Visual Studio
 .vs/

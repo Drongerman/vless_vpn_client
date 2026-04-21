@@ -86,6 +86,14 @@ public class ConfigurationService
         // Не заменяем пользовательские правила — только добавляем отсутствующие.
         var defaults = new[]
         {
+            // Geosite-категории RU (Loyalsoldier)
+            "geosite:category-ru",
+            "geosite:category-gov-ru",
+            "geosite:category-media-ru",
+            "geosite:yandex",
+            "geosite:vk",
+            "geosite:mail-ru",
+            "geosite:telegram",
             // GeoIP — весь российский трафик напрямую
             "geoip:ru",
             // Яндекс (.com/.net домены, которые не ловятся через domain:.ru)
@@ -147,6 +155,11 @@ public class ConfigurationService
     {
         var defaults = new[]
         {
+            // Geosite-категории (Loyalsoldier) — западные сервисы целиком
+            "geosite:google", "geosite:youtube", "geosite:apple", "geosite:microsoft",
+            "geosite:facebook", "geosite:instagram", "geosite:anthropic",
+            "geosite:openai", "geosite:twitter", "geosite:discord",
+            "geosite:github", "geosite:netflix", "geosite:spotify",
             // Google / YouTube
             "domain:google.com", "domain:google.ru", "domain:googleapis.com",
             "domain:googlevideo.com", "domain:googleusercontent.com", "domain:gstatic.com",

@@ -133,6 +133,21 @@ public class AppSettings
     /// </summary>
     public List<string> ForceProxyDomains { get; set; } = new()
     {
+        // ===== Geosite-категории (Loyalsoldier) — целиком все известные домены =====
+        "geosite:google",
+        "geosite:youtube",
+        "geosite:apple",
+        "geosite:microsoft",
+        "geosite:facebook",
+        "geosite:instagram",
+        "geosite:anthropic",
+        "geosite:openai",
+        "geosite:twitter",
+        "geosite:discord",
+        "geosite:github",
+        "geosite:netflix",
+        "geosite:spotify",
+
         // ===== Google / YouTube =====
         "domain:google.com",
         "domain:google.ru",
@@ -250,6 +265,15 @@ public class AppSettings
     /// </summary>
     public List<string> BypassDomains { get; set; } = new()
     {
+        // ===== Geosite-категории RU (Loyalsoldier) =====
+        "geosite:category-ru",
+        "geosite:category-gov-ru",
+        "geosite:category-media-ru",
+        "geosite:yandex",
+        "geosite:vk",
+        "geosite:mail-ru",
+        "geosite:telegram",
+
         // ===== Российские TLD =====
         "domain:.ru",
         "domain:.su",
